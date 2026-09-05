@@ -32,6 +32,12 @@
 (ffi/defcfn ^:private should-close-raw "WindowShouldClose" [] :int)
 
 ;; --- frame -------------------------------------------------------------------
+;; raylib 6.0 dropped core SetBlendMode; rlgl's takes the raw GL factors
+;; (src, dst, equation) - these three are standard alpha blending
+(ffi/defcfn rl-set-blend "rlSetBlendMode" [:int :int :int] :void)
+(def ^:const GL-SRC-ALPHA 0x0302)
+(def ^:const GL-ONE-MINUS-SRC-ALPHA 0x0303)
+(def ^:const GL-FUNC-ADD 0x8006)
 (ffi/defcfn begin-drawing    "BeginDrawing"    [] :void)
 (ffi/defcfn end-drawing      "EndDrawing"      [] :void)
 (ffi/defcfn clear-background "ClearBackground" [:uint] :void)

@@ -16,6 +16,12 @@
   (when-let [v (System/getenv "VOXEL_APP_AUTOFIRE")]
     (try (Integer/parseInt v) (catch Exception _ nil))))
 
+;; headless smoke: override the 60fps cap (0 = uncapped) to measure the
+;; true frame-work time
+(def ^:private smoke-fps
+  (when-let [v (System/getenv "VOXEL_APP_FPS")]
+    (try (Integer/parseInt v) (catch Exception _ nil))))
+
 ;; headless smoke: scripted helm "thrust,turn" so scripted runs can show
 ;; ships underway without a keyboard
 (def ^:private smoke-helm
@@ -72,7 +78,7 @@
   [& _]
   (rl/window! :width WIDTH :height HEIGHT
               :title "naval battle - voxel warships on a particle ocean")
-  (rl/set-target-fps 60)
+  (rl/set-target-fps (if (nil? smoke-fps) 60 smoke-fps))
   (phys/init!)
   (let [deadline (rl/auto-quit-deadline)
         summary (volatile! nil)]
@@ -163,8 +169,8 @@
                             :winner (:winner world)
                             :events (mapv :type (:events world))
                             :debris (count debris')
-                            :avg-frame-ms (when (pos? frame)
-                                            (double (* 1000.0 (/ ttotal frame))))})
+            :avg-frame-ms (when (pos? frame)
+                            (double (* 1000.0 (/ ttotal frame))))})
           (recur (inc frame) world screen debris' consumed' (+ ttotal dt)))
         (when autofire-frame
           (println "[voxel] smoke summary:" (pr-str @summary))))))

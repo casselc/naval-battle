@@ -3,7 +3,9 @@
   warships on the particle ocean, shells in flight, the aim arc - plus the
   HUD overlay. No game logic here."
   (:require [voxel.raylib :as rl]
+            [voxel.seac :as seac]
             [voxel.world :as w]))
+
 
 ;; player vantage: behind and above the player's stern, looking downrange
 ;; at the enemy fleet
@@ -36,27 +38,6 @@
   [c s]
   (bit-and (bit-shift-right c s) 0xff))
 
-(defn- mix
-  "Linear blend of two packed colors."
-  [c1 c2 t]
-  (rl/rgba (int (+ (channel c1 0) (* t (- (channel c2 0) (channel c1 0)))))
-           (int (+ (channel c1 8) (* t (- (channel c2 8) (channel c1 8)))))
-           (int (+ (channel c1 16) (* t (- (channel c2 16) (channel c1 16)))))
-           255))
-
-(defn- scale-color
-  "Multiply a packed color's channels by f (may exceed 1, clamped to 255)."
-  [c f]
-  (rl/rgba (min 255 (int (* f (channel c 0))))
-           (min 255 (int (* f (channel c 8))))
-           (min 255 (int (* f (channel c 16))))
-           255))
-
-(defn- lift-color
-  "Blend a packed color toward white by t (specular highlight)."
-  [c t]
-  (mix c (rl/rgba 255 255 255 255) t))
-
 (defn- cell-color
   "Material colour with a deterministic per-cell tint so hulls do not read
   as flat slabs; wrecks shade down toward the deep."
@@ -66,129 +47,92 @@
         f (case v 0 1.0 1 0.93 2 0.86)]
     (rl/shade (get MAT-COLORS mat) (if sunk? (* 0.55 f) f))))
 
-(def ^:private DIR-TRIS
-  "Per face direction: the six corner-offsets (two triangles) of the exposed
-  unit-cell quad, mesh.clj's outward winding. Ships draw one quad per cached
-  exposed face instead of a full cube per surface cell."
-  {[1 0 0]  [[1 0 0] [1 1 0] [1 1 1] [1 0 0] [1 1 1] [1 0 1]]
-   [-1 0 0] [[0 0 0] [0 0 1] [0 1 1] [0 0 0] [0 1 1] [0 1 0]]
-   [0 1 0]  [[0 1 0] [0 1 1] [1 1 1] [0 1 0] [1 1 1] [1 1 0]]
-   [0 -1 0] [[0 0 0] [1 0 0] [1 0 1] [0 0 0] [1 0 1] [0 0 1]]
-   [0 0 1]  [[0 0 1] [1 0 1] [1 1 1] [0 0 1] [1 1 1] [0 1 1]]
-   [0 0 -1] [[0 0 0] [0 1 0] [1 1 0] [0 0 0] [1 1 0] [1 0 0]]})
+(def ^:private ship-meshes
+  "C hull meshes by ship id: {:id mesh-id :sig [face-count sunk] :ext
+  [ex ez]} - rebuilt only when damage or sinking changes the hull."
+  (volatile! {}))
 
-(def ^:private DIR-SHADE
-  "Face-direction depth shading, the same cues cube! used."
-  {[0 1 0] 1.0 [0 0 1] 1.0 [1 0 0] 0.85 [-1 0 0] 0.7 [0 0 -1] 0.5 [0 -1 0] 0.4})
+(defn- ship-extent
+  "Hull footprint semi-axes [ex ez] from its face cells."
+  [faces]
+  (let [abs #(Math/abs (double %))
+        is (map #(first (first %)) faces)
+        ks (map #((first %) 2) faces)]
+    [(inc (apply max (cons 0 (map abs is))))
+     (inc (apply max (cons 0 (map abs ks))))]))
+
+(defn- ensure-ship-mesh!
+  "The C mesh for one hull, rebuilt only when its signature (exposed-face
+  count, sunk) changes: jolt owns the per-face colours at build time -
+  material, per-cell tint, wreck shading - and C owns the per-frame
+  rotate/cull/shade/submit."
+  [id {:keys [cells faces sunk]}]
+  (let [sig [(count faces) sunk]
+        st (get @ship-meshes id)]
+    (if (and st (= sig (:sig st)))
+      (:id st)
+      (do (when st (seac/ship-free! (:id st)))
+          (let [fseq (seq faces)
+                colors (mapv (fn [[cell _dir]]
+                               (cell-color cell (get cells cell) sunk))
+                             fseq)
+                mid (seac/ship-init! fseq colors)]
+            (vswap! ship-meshes assoc id
+                    {:id mid :sig sig :ext (ship-extent fseq)})
+            mid)))))
 
 (defn- draw-ship!
-  "A warship at its physics transform: translate to the hull position,
-  rotate by its quaternion, and draw the cached exposed faces relative to
-  the anchor the body was spawned around - one quad per face."
-  [{:keys [pos quat anchor cells faces sunk]}]
-  (rl/rl-push-matrix)
-  (rl/rl-translate-f (double (pos 0)) (double (pos 1)) (double (pos 2)))
-  (rl/rl-rotate-quaternion! quat)
-  (rl/rl-begin rl/RL-TRIANGLES)
-  (let [[ax ay az] anchor]
-    (doseq [[cell dir] faces
-            :let [[i j k] cell
-                  base (rl/shade (cell-color cell (get cells cell) sunk)
-                                 (get DIR-SHADE dir))]]
-      (rl/rl-color! base)
-      ;; ffi :float slots want doubles - integral anchors make exact-long
-      ;; coordinates that the foreign conversion rejects
-      (doseq [o (get DIR-TRIS dir)]
-        (rl/rl-vertex-3f (double (- (+ i (o 0)) ax))
-                         (double (- (+ j (o 1)) ay))
-                         (double (- (+ k (o 2)) az))))))
-  (rl/rl-end)
-  (rl/rl-pop-matrix))
+  "A warship as ONE C-submitted mesh: per-face colours were computed at
+  build; per frame C rotates the faces by the hull quaternion, culls those
+  hidden from the camera, sun-shades by the live world normal and draws."
+  [id ship]
+  (let [mid (ensure-ship-mesh! id ship)]
+    (when (>= mid 0)
+      (seac/ship-draw! mid (:pos ship) (:quat ship) (:anchor ship)
+                       SUN-L CAMERA-POS))))
 
-(defn- ambient-swell
-  "A gentle visual-only swell so the sea reads as water even before the
-  battle kicks it around: three crossing travelling sine waves. The physics
-  particles' own spray height rides on top of it."
-  [x z t]
-  (+ (* 0.09 (Math/sin (+ (* 0.8 x) (* 1.3 t))))
-     (* 0.07 (Math/sin (- (* 0.5 z) (* 1.1 t))))
-     (* 0.05 (Math/sin (+ (* 0.4 (+ x z)) (* 0.7 t))))))
-
-(defn- sea-grid
-  "Particles keyed by their grid cell, for height-field gradients."
-  [particles]
-  (into {} (map (fn [p]
-                  [[(Math/round (/ (:x p) 2.0)) (Math/round (/ (:z p) 2.0))] p])
-                particles)))
-
-(defn- tile-normal
-  "Surface normal from central differences over the tile height field."
-  [grid i j]
-  (let [h (fn [ii jj] (or (:y (get grid [ii jj])) 0.0))
-        gx (/ (- (h (inc i) j) (h (dec i) j)) 4.0)
-        gz (/ (- (h i (inc j)) (h i (dec j))) 4.0)
-        l (Math/sqrt (+ 1.0 (* gx gx) (* gz gz)))]
-    [(/ (- gx) l) (/ 1.0 l) (/ (- gz) l)]))
-
-(defn- hull-shadow
-  "1.0 in open water, falling to 0.0 under a floating hull's footprint (a
-  soft ellipse the length of the ship), so vessels sit ON the sea instead of
-  floating above it."
-  [ships x z]
-  (reduce (fn [b s]
-            (let [sy ((:pos s) 1)]
-              (if (or (:sunk s) (< sy -4.5))
-                b
-                (let [dx (/ (- x ((:pos s) 0)) 4.5)
-                      dz (/ (- z ((:pos s) 2)) 9.0)
-                      d (Math/sqrt (+ (* dx dx) (* dz dz)))]
-                  (min b (max 0.0 (min 1.0 (/ (- d 0.75) 0.5))))))))
-          1.0 (vals ships)))
+(def ^:private sea-mesh-ready? (volatile! false))
 
 (defn- draw-sea!
-  "The particle ocean: one deep plane out to the horizon, then every ocean
-  particle as a surface tile. Tiles are LIT: the wave normal from the local
-  height field diffuses against the sun, crests aligned with the view
-  sparkle, hulls shadow the water under them, and spray/vorticity whiten
-  toward foam."
-  [ocean ships t]
+  "The whole ocean as ONE mesh built and drawn in C: the particle sheet at
+  full SPAcing-unit resolution, the same swell continuing to the horizon,
+  per-corner sun shading - one buffer upload and one draw call. Issuing the
+  same sheet per-vertex from jolt cost 40ms of frame time."
+  [ocean t]
+  (when-not @sea-mesh-ready?
+    (seac/mesh-init! w/SEA-COLS w/SEA-COLS w/SEA-SPACING w/SEA-EXTENT)
+    (vreset! sea-mesh-ready? true))
+  (seac/mesh-update! (:particles ocean) t SUN-L HALF-VIEW DEEP SWELL FOAM)
+  (seac/mesh-draw!))
+
+(def ^:private SHADOW-ALPHA 96)
+
+(defn- draw-shadows!
+  "Hull shadows as soft dark ellipses on the water, offset from the hull
+  along the sun rays. Reads as a cast shadow from the battle camera
+  without per-face projection, and the waves show through them."
+  [ships]
+  (rl/rl-set-blend rl/GL-SRC-ALPHA rl/GL-ONE-MINUS-SRC-ALPHA rl/GL-FUNC-ADD)
   (rl/rl-begin rl/RL-TRIANGLES)
-  (rl/rl-color! DEEP)
-  (rl/rl-vertex-3f -70.0 0.0 -70.0)
-  (rl/rl-vertex-3f 70.0 0.0 70.0)
-  (rl/rl-vertex-3f 70.0 0.0 -70.0)
-  (rl/rl-vertex-3f -70.0 0.0 -70.0)
-  (rl/rl-vertex-3f -70.0 0.0 70.0)
-  (rl/rl-vertex-3f 70.0 0.0 70.0)
-  (rl/rl-end)
-  (let [grid (sea-grid (mapv (fn [p]
-                               (assoc p :y (+ (or (:y p) 0.0)
-                                              (ambient-swell (:x p) (:z p) t))))
-                             (:particles ocean)))]
-    (rl/rl-begin rl/RL-TRIANGLES)
-    (doseq [[i j :as cell] (keys grid)]
-      (let [p (get grid cell)
-            y (:y p)
-            n (tile-normal grid i j)
-            diffuse (max 0.0 (+ (* (n 0) (SUN-L 0)) (* (n 1) (SUN-L 1)) (* (n 2) (SUN-L 2))))
-            spec (Math/pow (max 0.0 (+ (* (n 0) (HALF-VIEW 0))
-                                       (* (n 1) (HALF-VIEW 1))
-                                       (* (n 2) (HALF-VIEW 2))))
-                           24.0)
-            foam (min 1.0 (+ (* 0.8 (or (:y p) 0.0))
-                             (* 0.3 (Math/abs (or (:omega p) 0.0)))))
-            shade (min 1.0 (+ (* 0.45 diffuse)
-                              (* 0.55 (hull-shadow ships (:x p) (:z p)))))
-            base (mix SWELL FOAM foam)
-            ;; a single top quad per tile: the camera flies above the sea
-            ty (+ 0.08 (* 0.6 y))
-            x0 (- (:x p) 0.99) x1 (+ (:x p) 0.99)
-            z0 (- (:z p) 0.99) z1 (+ (:z p) 0.99)]
-        (rl/rl-color! (lift-color (scale-color base (* 1.9 shade)) (* 0.7 spec)))
-        (rl/rl-vertex-3f x0 ty z1) (rl/rl-vertex-3f x1 ty z1)
-        (rl/rl-vertex-3f x1 ty z0) (rl/rl-vertex-3f x0 ty z1)
-        (rl/rl-vertex-3f x1 ty z0) (rl/rl-vertex-3f x0 ty z0)))
-    (rl/rl-end)))
+  (doseq [[id {:keys [pos sunk]}] ships
+          :when (and (not sunk) (> (pos 1) -4.5))
+          :let [[ex ez] (or (:ext (get @ship-meshes id)) [5.0 15.0])
+                h (max 0.5 (- (+ (pos 1) 2.5)))
+                cx (+ (pos 0) (* (- (SUN-L 0)) (/ h (SUN-L 1))))
+                cz (+ (pos 2) (* (- (SUN-L 2)) (/ h (SUN-L 1))))
+                y 0.28]]
+    (rl/rl-color! (rl/rgba 6 18 36 SHADOW-ALPHA))
+    (dotimes [s 12]
+      (let [a0 (/ (* 2.0 Math/PI s) 12.0)
+            a1 (/ (* 2.0 Math/PI (inc s)) 12.0)]
+        (rl/rl-vertex-3f (double cx) (double y) (double cz))
+        (rl/rl-vertex-3f (double (+ cx (* ex (Math/cos a0))))
+                         (double y)
+                         (double (+ cz (* ez (Math/sin a0)))))
+        (rl/rl-vertex-3f (double (+ cx (* ex (Math/cos a1))))
+                         (double y)
+                         (double (+ cz (* ez (Math/sin a1))))))))
+  (rl/rl-end))
 
 (defn- draw-shells!
   [shells]
@@ -273,9 +217,11 @@
                       :target-z (CAMERA-TARGET 2)
                       :fovy FOVY :projection 0}
     (fn []
-      (draw-sea! (:ocean world) (:ships world) (or (:time world) 0.0))
-      (doseq [ship (vals (:ships world))]
-        (draw-ship! ship))
+      (let [t (or (:time world) 0.0)]
+        (draw-sea! (:ocean world) t)
+        (draw-shadows! (:ships world)))
+      (doseq [[id ship] (:ships world)]
+        (draw-ship! id ship))
       (draw-shells! (:shells world))
       (when (= :game screen)
         (draw-aim! (:aim ui))

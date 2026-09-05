@@ -8,7 +8,11 @@
                 ;; Box3D via the pointer/scalar shim. `jolt native` builds it.
                 {:name "voxel_b3"
                  :darwin ["native/libvoxel_b3.dylib"]
-                 :linux  ["native/libvoxel_b3.so"]}]
+                 :linux  ["native/libvoxel_b3.so"]}
+                ;; sparse vortex-field kernel, no deps
+                {:name "voxel_sea"
+                 :darwin ["native/libvoxel_sea.dylib"]
+                 :linux  ["native/libvoxel_sea.so"]}]
 
  ;; The shared library above is compiled from native/voxel_b3.c by `jolt native`.
  ;; Tasks come from deps.edn as readily as from bb.edn, so the C build lives with
@@ -54,9 +58,24 @@
                       "-o" lib)
                (println "built:" lib)))}
 
+  sea
+  {:doc "compile native/voxel_sea.c into the sea-field kernel library"
+   :task (let [sea-lib (str "native/libvoxel_sea." (if mac? "dylib" "so"))
+               sea-src "native/voxel_sea.c"]
+           (if (fs/exists? sea-lib)
+             (println "sea: up to date")
+             (do (shell "cc" "-O2" "-shared" "-fPIC"
+                        (str "-I" (or (System/getenv "RAYLIB_INCLUDE")
+                                      "/opt/homebrew/include"))
+                        sea-src "-o" sea-lib "-lraylib")
+                 (println "built:" sea-lib))))}
+
   clean-native
-  {:doc "remove the compiled shim (not the vendored Box3D build)"
-   :task (do (fs/delete-if-exists lib) (println "removed:" lib))}}
+  {:doc "remove the compiled shims (not the vendored Box3D build)"
+   :task (do (fs/delete-if-exists lib)
+             (fs/delete-if-exists "native/libvoxel_sea.dylib")
+             (fs/delete-if-exists "native/libvoxel_sea.so")
+             (println "removed:" lib))}}
 
  :aliases {:test {:extra-paths ["test"]
                   :main-opts ["-m" "voxel.test-runner"]}

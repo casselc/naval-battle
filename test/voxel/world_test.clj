@@ -144,3 +144,13 @@
         d (Math/sqrt (reduce + (map #(* % %) (map - p e))))]
     (is (>= d 40.0)
         "fleets start beyond the 36-unit low-arc gun range - sail in to engage")))
+
+(deftest the-sea-covers-the-whole-arena
+  (let [st (w/initial-state)
+        ps (get-in st [:ocean :particles])]
+    (is (>= (count ps) 1500) "one continuous particle sheet, not a patch")
+    (doseq [s (vals (:ships st))]
+      (let [[px _ pz] (:pos s)]
+        (is (some (fn [p] (and (< (Math/abs (- (:x p) px)) 1.5)
+                               (< (Math/abs (- (:z p) pz)) 1.5))) ps)
+            "water is under every hull from the first frame")))))

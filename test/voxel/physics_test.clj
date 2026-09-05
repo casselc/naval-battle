@@ -6,7 +6,9 @@
             [voxel.physics :as phys]
             [voxel.ship :as ship]
             [voxel.world :as w]
-            [voxel.buoyancy :as buoy]))
+            [voxel.buoyancy :as buoy]
+            [voxel.ocean :as ocean]
+            [voxel.seac :as seac]))
 
 (def ^:private raft
   "2x1x3 cell hull section."
@@ -24,6 +26,35 @@
   (-> (filter #(= id (:body %)) (:bodies facts))
       first
       (get-in [:pos 1])))
+
+(defn- lcg
+  [seed]
+  (let [s (atom seed)]
+    (fn []
+      (let [x (rem (+ (* 1103515245 @s) 12345) 2147483648)]
+        (reset! s x)
+        x))))
+
+(defn- cloud
+  "n particles over the arena with `na` seeded vortices, deterministic."
+  [n na seed]
+  (let [r (lcg seed)
+        u (fn [] (- (* 88.0 (/ (rem (r) 1000000) 1000000.0)) 44.0))]
+    (mapv (fn [i] {:x (u) :z (u) :omega (if (< i na) (- (* 3.0 (u)) 1.5) 0.0)})
+          (range n))))
+
+(deftest c-sea-field-matches-the-pure-sum
+  (testing "the C kernel returns the reference sparse field"
+    (let [ps (cloud 400 25 7)
+          pure (ocean/velocities {:particles ps})
+          c (seac/field ps ocean/FIELD-RADIUS ocean/ACTIVE-EPS)]
+      (is (= (count pure) (count c)))
+      (is (every? (fn [[u v]] (< (Math/abs (- (nth u 0) (nth v 0))) 1e-9))
+                  (mapv vector pure c))
+          "x components agree")
+      (is (every? (fn [[u v]] (< (Math/abs (- (nth u 2) (nth v 2))) 1e-9))
+                  (mapv vector pure c))
+          "z components agree"))))
 
 (deftest ocean-world-has-no-ground
   (phys/init!)

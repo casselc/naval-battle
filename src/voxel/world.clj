@@ -55,10 +55,17 @@
      :cooldown 0.0
      :sunk false}))
 
+(def SEA-EXTENT 32.0)   ; the simulated sheet spans [-EXTENT, EXTENT]^2
+(def SEA-SPACING 1.5)  ; one particle per SPAcing-unit tile
+(def SEA-COLS (int (inc (* 2.0 (/ SEA-EXTENT SEA-SPACING)))))
+
 (defn- calm-sea
-  "A still ocean patch: one particle per 2-unit tile over the domain."
+  "A still ocean sheet: one particle per tile across the whole arena, out
+  past both fleets and the gun range - the sea is one continuous particle
+  system, not a patch in the middle."
   []
-  (for [x (range -9.0 10.0 2.0) z (range -9.0 10.0 2.0)]
+  (for [x (range (- SEA-EXTENT) (+ SEA-EXTENT 0.01) SEA-SPACING)
+        z (range (- SEA-EXTENT) (+ SEA-EXTENT 0.01) SEA-SPACING)]
     {:x x :z z :omega 0.0}))
 
 (defn initial-state

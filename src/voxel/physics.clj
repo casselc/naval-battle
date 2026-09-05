@@ -13,6 +13,8 @@
   touching the collision shape, so flooding and buoyancy react to damage the
   instant it happens while the shape refresh stays with the world layer."
   (:require [voxel.box3d :as b3]
+            [voxel.ocean :as ocean]
+            [voxel.seac :as seac]
             [voxel.buoyancy :as buoy]
             [voxel.world :as w]))
 
@@ -34,6 +36,14 @@
   walls - things that sink leave the arena. Any previous world is replaced."
   []
   (when-let [old @world*] (b3/destroy-world! old))
+  ;; the C sparse-field kernel, when the native library loads: same sums as
+  ;; the pure reference, microseconds instead of milliseconds per frame
+  (try
+    (seac/field [{:x 0.0 :z 0.0 :omega 0.0} {:x 1.0 :z 0.0 :omega 1.0}] 14.0 1e-9)
+    (reset! ocean/field-kernel
+            (fn [oc] (seac/field (:particles oc)
+                                 ocean/FIELD-RADIUS ocean/ACTIVE-EPS)))
+    (catch Exception _ nil))
   (let [wrld (b3/create-world 0.0 (- w/GRAVITY) 0.0 1)]
     (vreset! world* wrld)
     (vreset! ball* nil)

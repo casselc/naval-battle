@@ -30,7 +30,7 @@
 
   Everything is pure data ({:particles [...]}) and headless-testable.")
 
-(def BOUNDS 10.0)
+(def BOUNDS 44.0)
 (def LEAF-MAX 12)
 (def MAX-DEPTH 6)
 (def EXPANSION-P 10)
@@ -465,15 +465,67 @@
       (assoc p :y y :vy vy))))
 
 (def DIRECT-MAX 220)
+(def ACTIVE-EPS 1e-9)   ; vorticity at or below this is still water
+(def FIELD-RADIUS 14.0) ; the exact field reaches this far from any vortex
+(def SPARSE-MAX 160)    ; more active vortices than this: dense churn, run the FMM
+(def ^:private BUCKET 4.0) ; sparse-field target bucket width, world units
+
+(defn- sparse-velocities
+  "Exact Biot-Savart from the active vortices only, evaluated on the water
+  within FIELD-RADIUS of one; beyond that the 1/r tail is under the noise
+  and the sea rests. A battle agitates a few dozen particles at a time, so
+  the whole-ocean cost is pairs-that-matter, not N^2. This pure loop is the
+  REFERENCE - at runtime physics/init! swaps in the C kernel (voxel.seac)
+  for the same sum at native speed."
+  [ps]
+  (let [act (vec (filter #(> (Math/abs (:omega %)) ACTIVE-EPS) ps))
+        ax (mapv :x act)
+        az (mapv :z act)
+        ak (mapv #(/ (:omega %) (* 2.0 Math/PI)) act)
+        m (count act)
+        r2 (* FIELD-RADIUS FIELD-RADIUS)]
+    (mapv (fn [p]
+            (let [px (:x p) pz (:z p)]
+              (loop [j 0 fx 0.0 fz 0.0]
+                (if (== j m)
+                  [fx 0.0 fz]
+                  (let [dx (- px (ax j))
+                        dz (- pz (az j))
+                        d2 (+ (* dx dx) (* dz dz))]
+                    (if (or (> d2 r2) (< d2 1e-24))
+                      (recur (inc j) fx fz)
+                      (let [k (ak j)]
+                        (recur (inc j)
+                               (- fx (/ (* k dz) d2))
+                               (+ fz (/ (* k dx) d2))))))))))
+          ps)))
+
+(def field-kernel
+  "Optional accelerator for the sparse field: physics/init! resets this to
+  the C kernel (voxel.seac/field) at startup when the native library loads.
+  Tests always run the pure reference above."
+
+  (atom nil))
 
 (defn velocities
-  "The velocity field however it is cheapest at this sea size: the direct
-  O(N^2) Biot-Savart sum below DIRECT-MAX particles, the FMM above it (the
-  quadtree passes are pure overhead on a small sea)."
+  "The velocity field however it is cheapest at this sea state:
+  - a still sea: no vortices, no field, no pair sums at all;
+  - sparse vorticity (the usual battle): exact sums from the actives out to
+    FIELD-RADIUS, still water beyond;
+  - a fully agitated small sea: the direct O(N^2) sum, exact everywhere;
+  - dense churn on a big sea: the FMM - the quadtree groups the whole sea so
+    the cost stays O(N), which is the point of the fast algorithm."
   [oc]
-  (if (<= (count (:particles oc)) DIRECT-MAX)
-    (direct-velocities oc)
-    (fmm-velocities oc)))
+  (let [ps (:particles oc)
+        n (count ps)
+        na (count (filter #(> (Math/abs (:omega %)) ACTIVE-EPS) ps))]
+    (cond
+      (zero? na) (vec (repeat n [0.0 0.0 0.0]))
+      (<= na SPARSE-MAX) (if-let [k @field-kernel]
+                           (k oc)
+                           (sparse-velocities ps))
+      (<= n DIRECT-MAX) (direct-velocities oc)
+      :else (fmm-velocities oc))))
 
 (defn step-ocean
   "Advance the ocean dt seconds. blasts and hulls are this frame's couplings
@@ -489,7 +541,12 @@
          b (:bounds oc)
          drag (Math/pow IMPULSE-DRAG dt)
          ps' (mapv (fn [p [fx _ fz]]
-                     (let [vx (+ (:vx p) fx)
+                     (if (and (zero? fx) (zero? fz)
+                              (zero? (:vx p)) (zero? (:vz p))
+                              (zero? (:vy p)) (zero? (:y p))
+                              (<= (Math/abs (:omega p)) ACTIVE-EPS))
+                       p
+                       (let [vx (+ (:vx p) fx)
                            vz (+ (:vz p) fz)
                            x (+ (:x p) (* vx dt))
                            z (+ (:z p) (* vz dt))
@@ -503,6 +560,6 @@
                                      :vx (* (- vx' fx) drag)
                                      :vz (* (- vz' fz) drag)
                                      :omega (* (- 1.0 (* vis dt)) (:omega p)))]
-                       (step-vertical p' dt)))
+                       (step-vertical p' dt))))
                    ps field)]
      (assoc oc :particles ps' :time (+ (or (:time oc) 0.0) dt)))))

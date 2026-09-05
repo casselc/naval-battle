@@ -127,10 +127,53 @@
 
 (deftest ocean-stays-bounded
   (testing "particles reflect at the domain walls"
-    (let [oc (sea/make-ocean [{:x 9.9 :z 0.0 :omega 0.0 :vx 4.0}])
+    (let [oc (sea/make-ocean [{:x (- sea/BOUNDS 0.1) :z 0.0 :omega 0.0 :vx 4.0}])
           oc' (sea/step-ocean oc 0.1 nil)]
-      (is (<= (Math/abs (-> oc' :particles first :x)) 10.0))
+      (is (<= (Math/abs (-> oc' :particles first :x)) sea/BOUNDS))
       (is (neg? (-> oc' :particles first :vx) ) "reflected inward"))))
+
+(defn- near-v
+  [u v]
+  (every? #(< (Math/abs %) 1e-9) (map - u v)))
+
+(deftest a-still-sea-has-no-field
+  (testing "a calm sea beyond DIRECT-MAX skips the pair sums entirely"
+    (let [oc (sea/make-ocean (mapv #(assoc % :omega 0.0)
+                                   (:particles (random-cloud 300 11))))]
+      (is (every? #(= [0.0 0.0 0.0] %) (sea/velocities oc))))))
+
+(deftest sparse-vorticity-stays-exact-where-it-matters
+  (testing "one vortex in a big calm sea: nearby water gets the exact field"
+    (let [calm (mapv #(assoc % :omega 0.0) (:particles (random-cloud 300 12)))
+          oc (sea/make-ocean (assoc calm 7 (assoc (calm 7) :omega 2.5)))
+          exact (sea/direct-velocities oc)
+          got (sea/velocities oc)
+          src (nth (:particles oc) 7)
+          sx (:x src) sz (:z src)]
+      (doseq [i (range 300)
+              :let [p (nth (:particles oc) i)]
+              :when (< (+ (* (- (:x p) sx) (- (:x p) sx)) (* (- (:z p) sz) (- (:z p) sz)))
+                       (* sea/FIELD-RADIUS sea/FIELD-RADIUS))]
+        (is (near-v (got i) (exact i)) (str "particle " i))))))
+
+(deftest far-water-rests-until-the-wake-reaches-it
+  (let [ring (mapv (fn [a] {:x (* 20.0 (Math/cos a)) :z (* 20.0 (Math/sin a)) :omega 0.0})
+                   (map #(* 2.0 Math/PI (/ % 24)) (range 24)))
+        oc (sea/make-ocean (conj ring {:x 0.0 :z 0.0 :omega 3.0}))]
+    (is (every? #(= [0.0 0.0 0.0] %) (butlast (sea/velocities oc)))
+        "beyond FIELD-RADIUS the 1/r tail is left still")
+    (is (some #(> (Math/abs (% 0)) 0.01) (sea/direct-velocities oc))
+        "the full sum would have moved it - the cutoff is the optimisation")))
+
+(deftest still-water-stays-put
+  (testing "a calm sea steps without touching a single particle"
+    (let [oc (sea/make-ocean (mapv #(assoc % :omega 0.0)
+                                   (:particles (random-cloud 300 14))))]
+      (is (= (:particles oc) (:particles (sea/step-ocean oc 0.05 nil nil)))))))
+
+(deftest densely-churned-seas-run-the-fmm
+  (let [oc (random-cloud 300 13)]
+    (is (= (sea/fmm-velocities oc) (sea/velocities oc)))))
 
 (deftest small-seas-sum-directly
   (testing "at or under DIRECT-MAX particles the field is the direct Biot-Savart sum"
