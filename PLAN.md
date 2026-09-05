@@ -1,3 +1,5 @@
+let's frame this as overhead isometric view and generte tiles using wave function collapse algorithm
+
 We'll be making a naval combat game, where the ocean is a particle simulation, and the ships are made of voxels. The first prototype will be of just the player
 against another ship shooting at one another until one sinks
 
@@ -16,3 +18,5 @@ use the following resources for reference
 /Users/yogthos/src/jolt-lang/voxel-siege
 fast-volume.html
 ~/src/fast-multipole-method
+
+/Users/yogthos/src/wave-function-collapse
