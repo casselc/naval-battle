@@ -191,11 +191,14 @@ void vsea_mesh_init(int cols, int rows, double step, double origin)
 	sea.ready = 1;
 }
 
-// vsea_mesh_update(spray, om, n, t, sun[3], half[3],
+// vsea_mesh_update(spray, xs, zs, om, n, t, sun[3], half[3],
 //                  deep[4], swell[4], foamc[4]):
 // refill the mesh for frame time t from the per-particle spray heights and
 // vorticities (foam), then upload. Colors mirror voxel.light's shading.
-void vsea_mesh_update(const double *spray, const double *om, int64_t n,
+// Field corners ride the mean (x,z) of their adjacent particles (clamped
+// near the lattice) so wake advection and swirls visibly drag the sheet.
+void vsea_mesh_update(const double *spray, const double *xs,
+                      const double *zs, const double *om, int64_t n,
                       double t,
                       const double *sun, const double *half,
                       const unsigned char *deep,
@@ -225,6 +228,37 @@ void vsea_mesh_update(const double *spray, const double *om, int64_t n,
 			int vi = ci * W + cj;
 			double x = -origin + ci * step;
 			double z = -origin + cj * step;
+			{
+				double mx = 0.0, mz = 0.0;
+				int pcnt = 0, i0 = ci - 1, j0 = cj - 1;
+				for (int i = i0; i <= i0 + 1 && i < cols; i++) {
+					if (i < 0)
+						continue;
+					for (int j = j0; j <= j0 + 1 && j < rows; j++) {
+						if (j < 0)
+							continue;
+						int p2 = i * rows + j;
+						mx += xs[p2];
+						mz += zs[p2];
+						pcnt++;
+					}
+				}
+				if (pcnt) {
+					mx /= pcnt;
+					mz /= pcnt;
+					double ddx = mx - x, ddz = mz - z, cl = 0.9;
+					if (ddx > cl)
+						ddx = cl;
+					else if (ddx < -cl)
+						ddx = -cl;
+					if (ddz > cl)
+						ddz = cl;
+					else if (ddz < -cl)
+						ddz = -cl;
+					x += ddx;
+					z += ddz;
+				}
+			}
 			double hm = ci > 0 ? hs[(ci - 1) * W + cj] : hs[vi];
 			double hp = ci < cols ? hs[(ci + 1) * W + cj] : hs[vi];
 			double gm = cj > 0 ? hs[ci * W + cj - 1] : hs[vi];

@@ -467,7 +467,10 @@
 (def DIRECT-MAX 220)
 (def ACTIVE-EPS 1e-9)   ; vorticity at or below this is still water
 (def FIELD-RADIUS 14.0) ; the exact field reaches this far from any vortex
-(def SPARSE-MAX 160)    ; more active vortices than this: dense churn, run the FMM
+(def SPARSE-MAX 4096)   ; actives up to this take the sparse/kernel path: the C
+                        ; field kernel covers every real battle state (~ms); the
+                        ; pure loop is the test reference. Past it the FMM takes
+                        ; over - the O(N*na) sums only lose at mega-sea scale.
 (def ^:private BUCKET 4.0) ; sparse-field target bucket width, world units
 
 (defn- sparse-velocities
@@ -510,11 +513,13 @@
 (defn velocities
   "The velocity field however it is cheapest at this sea state:
   - a still sea: no vortices, no field, no pair sums at all;
-  - sparse vorticity (the usual battle): exact sums from the actives out to
-    FIELD-RADIUS, still water beyond;
+  - a battle (the usual case): exact sums from the actives out to
+    FIELD-RADIUS, still water beyond - the C kernel when wired, the pure
+    loop otherwise;
   - a fully agitated small sea: the direct O(N^2) sum, exact everywhere;
-  - dense churn on a big sea: the FMM - the quadtree groups the whole sea so
-    the cost stays O(N), which is the point of the fast algorithm."
+  - actives past SPARSE-MAX on a mega-scale sea: the FMM - the quadtree
+    groups the whole sea so the cost stays O(N), which is the point of
+    the fast algorithm."
   [oc]
   (let [ps (:particles oc)
         n (count ps)

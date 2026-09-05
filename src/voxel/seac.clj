@@ -19,7 +19,7 @@
 
 (ffi/defcfn mesh-init* "vsea_mesh_init" [:int :int :double :double] :void)
 (ffi/defcfn mesh-update* "vsea_mesh_update"
-  [:pointer :pointer :int64 :double
+  [:pointer :pointer :pointer :pointer :int64 :double
    :pointer :pointer :pointer :pointer :pointer] :void)
 (ffi/defcfn mesh-draw* "vsea_mesh_draw" [] :void)
 (ffi/defcfn mesh-free* "vsea_mesh_free" [] :void)
@@ -49,6 +49,8 @@
   (when (or (nil? @mesh-bufs) (> n (:cap @mesh-bufs)))
     (reset! mesh-bufs {:cap (max n 4096)
                        :ys (ffi/alloc (* 8 (max n 4096)))
+                       :xs (ffi/alloc (* 8 (max n 4096)))
+                       :zs (ffi/alloc (* 8 (max n 4096)))
                        :om (ffi/alloc (* 8 (max n 4096)))
                        :sun (ffi/alloc 24)
                        :half (ffi/alloc 24)
@@ -70,6 +72,8 @@
   (ensure-mesh-buffers! (count ps))
   (let [b @mesh-bufs
         ys (:ys b)
+        xs (:xs b)
+        zs (:zs b)
         om (:om b)
         sunb (:sun b)
         halfb (:half b)
@@ -79,6 +83,8 @@
     (dotimes [i (count ps)]
       (let [p (nth ps i)]
         (ffi/write ys :double (double (or (:y p) 0.0)) (* 8 i))
+        (ffi/write xs :double (double (or (:x p) 0.0)) (* 8 i))
+        (ffi/write zs :double (double (or (:z p) 0.0)) (* 8 i))
         (ffi/write om :double (double (or (:omega p) 0.0)) (* 8 i))))
     (dotimes [k 3]
       (ffi/write sunb :double (double (nth sun k)) (* 8 k))
@@ -86,7 +92,7 @@
     (write-color! deepb deep)
     (write-color! swellb swell)
     (write-color! foamb foam)
-    (mesh-update* ys om (long (count ps)) (double t)
+    (mesh-update* ys xs zs om (long (count ps)) (double t)
                   sunb halfb deepb swellb foamb)))
 
 (defn mesh-draw!

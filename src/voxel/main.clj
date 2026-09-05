@@ -18,6 +18,10 @@
 
 ;; headless smoke: override the 60fps cap (0 = uncapped) to measure the
 ;; true frame-work time
+(def ^:private refire-every
+  (when-let [v (System/getenv "VOXEL_APP_REFIRE")]
+    (try (Integer/parseInt v) (catch Exception _ nil))))
+
 (def ^:private smoke-fps
   (when-let [v (System/getenv "VOXEL_APP_FPS")]
     (try (Integer/parseInt v) (catch Exception _ nil))))
@@ -81,7 +85,10 @@
   (rl/set-target-fps (if (nil? smoke-fps) 60 smoke-fps))
   (phys/init!)
   (let [deadline (rl/auto-quit-deadline)
-        summary (volatile! nil)]
+        summary (volatile! nil)
+        sim-work* (volatile! 0.0)
+        draw-work* (volatile! 0.0)
+        phys-work* (volatile! 0.0)]
     (loop [frame 0
            world (w/initial-state)
            ;; smoke mode (VOXEL_APP_AUTOFIRE) skips the title screen
@@ -90,7 +97,8 @@
            consumed 0
            ttotal 0.0]
       (if (rl/keep-running? deadline)
-        (let [;; raylib reports real frame time; shader compiles, GC and
+        (let [t0 (System/currentTimeMillis)
+              ;; raylib reports real frame time; shader compiles, GC and
                ;; window drags spike it to 0.1s+, which tunnels shells
                ;; through hulls. Both Box3D and the shell integrator want
                ;; bounded dt.
@@ -108,7 +116,10 @@
                                     render/CAMERA-POS render/CAMERA-TARGET
                                     render/FOVY)
                ;; scripted smoke-test shot: one salvo at the enemy
-               autofire? (and (= frame autofire-frame) (= :game screen))
+               autofire? (and (= :game screen)
+                              (or (= frame autofire-frame)
+                                  (and (pos? (or refire-every 0))
+                                       (zero? (rem frame refire-every)))))
                fire-target (if autofire?
                              (let [e (get-in world [:ships :enemy :pos])]
                                [(e 0) (+ (e 1) 1.0) (e 2)])
@@ -128,7 +139,9 @@
                             (not (get-in world [:ships :player :sunk])))
                    (phys/steer! player-body (helm 0) (helm 1)))
                ;; physics: step Box3D, fold the facts into the battle
+               tp0 (System/currentTimeMillis)
                facts (phys/step! dt)
+               _ (vswap! phys-work* + (- (System/currentTimeMillis) tp0))
                world (w/step-state world dt facts)
                ;; ships still without a physics body: frame zero, or a
                ;; restart just rebuilt the fleet
@@ -157,20 +170,27 @@
                fresh (filter #(contains? #{:blast :splash} (:type %))
                              (drop consumed (:events world)))
                debris' (step-debris (spawn-debris debris fresh) dt)
-               consumed' (count (:events world))]
+               consumed' (count (:events world))
+               tsim (- (System/currentTimeMillis) t0)
+               tdraw0 (System/currentTimeMillis)]
           (render/draw-frame! {:world world
                                :ui {:aim aim :mx (:mx in) :my (:my in)}
                                :debris debris'
                                :width WIDTH :height HEIGHT
                                :screen (end-screen screen world)})
           (rl/maybe-screenshot! frame 150)
+          (vswap! sim-work* + tsim)
+          (vswap! draw-work* + (- (System/currentTimeMillis) tdraw0))
           (vreset! summary {:frame frame
                             :phase (:phase world)
                             :winner (:winner world)
                             :events (mapv :type (:events world))
                             :debris (count debris')
             :avg-frame-ms (when (pos? frame)
-                            (double (* 1000.0 (/ ttotal frame))))})
+                            (double (* 1000.0 (/ ttotal frame))))
+            :avg-sim-ms (when (pos? frame) (/ @sim-work* frame 1.0))
+            :avg-draw-ms (when (pos? frame) (/ @draw-work* frame 1.0))
+            :avg-phys-ms (when (pos? frame) (/ @phys-work* frame 1.0))})
           (recur (inc frame) world screen debris' consumed' (+ ttotal dt)))
         (when autofire-frame
           (println "[voxel] smoke summary:" (pr-str @summary))))))

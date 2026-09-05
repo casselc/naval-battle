@@ -67,7 +67,8 @@
              (do (shell "cc" "-O2" "-shared" "-fPIC"
                         (str "-I" (or (System/getenv "RAYLIB_INCLUDE")
                                       "/opt/homebrew/include"))
-                        sea-src "-o" sea-lib "-lraylib")
+                        sea-src "-o" sea-lib
+                        (if mac? "/opt/homebrew/lib/libraylib.dylib" "-lraylib"))
                  (println "built:" sea-lib))))}
 
   clean-native

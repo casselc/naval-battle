@@ -171,14 +171,29 @@
                                    (:particles (random-cloud 300 14))))]
       (is (= (:particles oc) (:particles (sea/step-ocean oc 0.05 nil nil)))))))
 
-(deftest densely-churned-seas-run-the-fmm
-  (let [oc (random-cloud 300 13)]
-    (is (= (sea/fmm-velocities oc) (sea/velocities oc)))))
+(deftest battle-churn-runs-the-field-kernel
+  (testing "churn past the old 160 sparse ceiling routes to the wired kernel"
+    (let [ps (:particles (random-cloud 260 10))
+          oc (sea/make-ocean ps)
+          calls (volatile! 0)]
+      (is (> (count (filter #(> (Math/abs (:omega %)) sea/ACTIVE-EPS) ps)) 160)
+          "the fixture is churn past the old ceiling")
+      (reset! sea/field-kernel
+              (fn [o] (vswap! calls inc) (sea/sparse-velocities (:particles o))))
+      (let [got (sea/velocities oc)]
+        (is (= 1 @calls) "the kernel serves the churn, not the FMM")
+        (is (= got (sea/sparse-velocities ps)) "kernel result is the sparse field"))
+      (reset! sea/field-kernel nil)))
+  (testing "the same churn with no kernel wired falls back to the sparse sums"
+    (let [ps (:particles (random-cloud 260 10))]
+      (is (= (sea/sparse-velocities ps) (sea/velocities (sea/make-ocean ps)))))))
+
+(deftest seas-past-the-kernel-ceiling-run-the-fmm
+  (with-redefs [sea/SPARSE-MAX 5]
+    (let [oc (random-cloud (inc sea/DIRECT-MAX) 9)]
+      (is (= (sea/fmm-velocities oc) (sea/velocities oc))))))
 
 (deftest small-seas-sum-directly
   (testing "at or under DIRECT-MAX particles the field is the direct Biot-Savart sum"
     (let [oc (random-cloud sea/DIRECT-MAX 7)]
-      (is (= (sea/direct-velocities oc) (sea/velocities oc)))))
-  (testing "beyond DIRECT-MAX the FMM takes over"
-    (let [oc (random-cloud (inc sea/DIRECT-MAX) 9)]
-      (is (= (sea/fmm-velocities oc) (sea/velocities oc))))))
+      (is (= (sea/direct-velocities oc) (sea/velocities oc))))))
