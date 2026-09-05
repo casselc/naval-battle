@@ -33,6 +33,14 @@
     (try (mapv #(Double/parseDouble %) (clojure.string/split v #","))
          (catch Exception _ nil))))
 
+;; live development: with VOXEL_APP_NREPL=port the game process hosts an
+;; nREPL server, so namespaces reload while the loop runs. restart* and
+;; shot* are REPL handles consumed inside the frame loop - the REPL never
+;; calls raylib directly (GL is thread-confined). defonce so reloading
+;; voxel.main does not wipe a pending request.
+(defonce restart* (volatile! false))  ; (vreset! voxel.main/restart* true)
+(defonce shot* (volatile! nil))       ; (vreset! voxel.main/shot* "live.png")
+
 (defn- spawn-debris
   "Blasts and splashes kick up debris and spray cubes."
   [debris events]
@@ -83,6 +91,12 @@
   (rl/window! :width WIDTH :height HEIGHT
               :title "naval battle - voxel warships on a particle ocean")
   (rl/set-target-fps (if (nil? smoke-fps) 60 smoke-fps))
+  (when-let [port (System/getenv "VOXEL_APP_NREPL")]
+    (try
+      (require '[jolt.nrepl])
+      ((resolve 'jolt.nrepl/start) (Integer/parseInt port))
+      (println "[voxel] nREPL listening on" port)
+      (catch Exception e (println "[voxel] nREPL failed:" e))))
   (phys/init!)
   (let [deadline (rl/auto-quit-deadline)
         summary (volatile! nil)
@@ -104,17 +118,19 @@
                ;; bounded dt.
                dt (min 0.033 (double (rl/get-frame-time)))
                in (input/snapshot WIDTH HEIGHT)
-               ;; title/end: any click or R restarts the round
-               restart-now (or (and (not= :game screen)
-                                    (or (:pressed? in) (:restart? in)))
-                               (and (= :game screen) (:restart? in)))
-               _ (when restart-now (phys/init!))
-               world (if restart-now (w/initial-state) world)
-               screen (if restart-now :game screen)
-               consumed (if restart-now 0 consumed)
-               aim (input/sea-point (:mx in) (:my in) WIDTH HEIGHT
-                                    render/CAMERA-POS render/CAMERA-TARGET
-                                    render/FOVY)
+               ;; title/end: any click or R restarts the round; the REPL
+                ;; can force one via restart*
+                restart-now (or @restart*
+                                (and (not= :game screen)
+                                     (or (:pressed? in) (:restart? in)))
+                                (and (= :game screen) (:restart? in)))
+                _ (when restart-now (vreset! restart* false) (phys/init!))
+                world (if restart-now (w/initial-state) world)
+                screen (if restart-now :game screen)
+                consumed (if restart-now 0 consumed)
+                aim (input/sea-point (:mx in) (:my in) WIDTH HEIGHT
+                                     render/CAMERA-POS render/CAMERA-TARGET
+                                     render/FOVY render/CAMERA-ORTHO)
                ;; scripted smoke-test shot: one salvo at the enemy
                autofire? (and (= :game screen)
                               (or (= frame autofire-frame)
@@ -179,6 +195,9 @@
                                :width WIDTH :height HEIGHT
                                :screen (end-screen screen world)})
           (rl/maybe-screenshot! frame 150)
+           (when-let [s @shot*]
+             (vreset! shot* nil)
+             (rl/screenshot! s))
           (vswap! sim-work* + tsim)
           (vswap! draw-work* + (- (System/currentTimeMillis) tdraw0))
           (vreset! summary {:frame frame

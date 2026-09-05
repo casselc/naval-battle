@@ -7,11 +7,13 @@
             [voxel.world :as w]))
 
 
-;; player vantage: behind and above the player's stern, looking downrange
-;; at the enemy fleet
-(def CAMERA-POS [0.0 16.0 -46.0])
-(def CAMERA-TARGET [0.0 1.0 6.0])
-(def FOVY 55.0)
+;; RTS vantage: a high isometric orthographic look over the whole arena -
+;; 45-degree azimuth, ~35-degree elevation - so both fleets and the sea
+;; between them read like a battle map
+(def CAMERA-POS [-60.0 62.0 -60.0])
+(def CAMERA-TARGET [0.0 0.0 0.0])
+(def FOVY 110.0)          ; orthographic: vertical world-units in view
+(def CAMERA-ORTHO 1)      ; raylib projection: 1 = CAMERA_ORTHOGRAPHIC
 
 (def MAT-COLORS
   {:hull (rl/rgba 72 94 112 255)       ; steel grey-blue
@@ -29,9 +31,9 @@
                  l (Math/sqrt (+ (* x x) (* y y) (* z z)))]
              [(/ x l) (/ y l) (/ z l)]))
 (def HALF-VIEW
-  (let [v [(- 0.0 (CAMERA-POS 0)) (- 16.0 (CAMERA-POS 1)) (- 6.0 (CAMERA-POS 2))]
+  (let [v (mapv - CAMERA-TARGET CAMERA-POS)
         x (+ (SUN-L 0) (v 0)) y (+ (SUN-L 1) (v 1)) z (+ (SUN-L 2) (v 2))
-        l (Math/sqrt (+ (* x x) (* y y) (* z z)))]
+        l (Math/sqrt (+ (* x x) (+ (* y y) (* z z))))]
     [(/ x l) (/ y l) (/ z l)]))
 
 (defn- channel
@@ -47,10 +49,10 @@
         f (case v 0 1.0 1 0.93 2 0.86)]
     (rl/shade (get MAT-COLORS mat) (if sunk? (* 0.55 f) f))))
 
-(def ^:private ship-meshes
-  "C hull meshes by ship id: {:id mesh-id :sig [face-count sunk] :ext
-  [ex ez]} - rebuilt only when damage or sinking changes the hull."
-  (volatile! {}))
+;; defonce: surviving ns reloads keeps the C meshes valid instead of
+;; leaking them (ids are {:id mesh-id :sig [face-count sunk] :ext [ex ez]},
+;; rebuilt only when damage or sinking changes the hull)
+(defonce ship-meshes (volatile! {}))
 
 (defn- ship-extent
   "Hull footprint semi-axes [ex ez] from its face cells."
@@ -91,7 +93,7 @@
       (seac/ship-draw! mid (:pos ship) (:quat ship) (:anchor ship)
                        SUN-L CAMERA-POS))))
 
-(def ^:private sea-mesh-ready? (volatile! false))
+(defonce sea-mesh-ready? (volatile! false))
 
 (defn- draw-sea!
   "The whole ocean as ONE mesh built and drawn in C: the particle sheet at
@@ -215,7 +217,7 @@
   (rl/with-camera-3d {:pos-x (CAMERA-POS 0) :pos-y (CAMERA-POS 1) :pos-z (CAMERA-POS 2)
                       :target-x (CAMERA-TARGET 0) :target-y (CAMERA-TARGET 1)
                       :target-z (CAMERA-TARGET 2)
-                      :fovy FOVY :projection 0}
+                       :fovy FOVY :projection CAMERA-ORTHO}
     (fn []
       (let [t (or (:time world) 0.0)]
         (draw-sea! (:ocean world) t)

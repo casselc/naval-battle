@@ -400,3 +400,9 @@
   (when (and shot-path (= frame at))
     (flush-batch)
     (take-screenshot shot-path)))
+
+(defn screenshot!
+  "On-demand PNG dump for the live REPL loop: flush the batch, shoot."
+  [path]
+  (flush-batch)
+  (take-screenshot path))

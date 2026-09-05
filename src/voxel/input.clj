@@ -56,21 +56,33 @@
 (defn sea-point
   "Mouse position -> the point where the camera ray through it crosses the
   flat sea (y = 0): where the player is aiming. Falls back to a far
-  downrange point when the ray never dips below the horizon."
-  [mx my width height cam-pos cam-target fovy]
-  (let [f (norm3 (mapv - cam-target cam-pos))
-        r (norm3 (cross3 f [0.0 1.0 0.0]))
-        u (cross3 r f)
-        t (Math/tan (Math/toRadians (/ fovy 2.0)))
-        a (/ (double width) (double height))
-        ndc-x (- (* 2.0 (/ (double mx) width)) 1.0)
-        ndc-y (- 1.0 (* 2.0 (/ (double my) height)))
-        dir (norm3 (mapv + f
-                          (mapv #(* ndc-x t a %) r)
-                          (mapv #(* ndc-y t %) u)))
-        dy (dir 1)
-        s (if (< dy -1e-4) (- (/ (cam-pos 1) dy)) 400.0)
-        x (+ (cam-pos 0) (* s (dir 0)))
-        z (+ (cam-pos 2) (* s (dir 2)))
-        clamp (fn [v] (max -70.0 (min 70.0 v)))]
-    [(clamp x) 0.0 (clamp z)]))
+  downrange point when the ray never dips below the horizon. The 8-arg
+  arity serves the orthographic RTS camera (fovy = full vertical
+  world-units in view); the 7-arg arity stays perspective."
+  ([mx my width height cam-pos cam-target fovy]
+   (sea-point mx my width height cam-pos cam-target fovy false))
+  ([mx my width height cam-pos cam-target fovy ortho?]
+   (let [f (norm3 (mapv - cam-target cam-pos))
+         r (norm3 (cross3 f [0.0 1.0 0.0]))
+         u (cross3 r f)
+         a (/ (double width) (double height))
+         ndc-x (- (* 2.0 (/ (double mx) width)) 1.0)
+         ndc-y (- 1.0 (* 2.0 (/ (double my) height)))
+         dir (if ortho?
+               f
+               (norm3 (mapv + f
+                            (mapv #(* ndc-x (Math/tan (Math/toRadians (/ fovy 2.0))) a %) r)
+                            (mapv #(* ndc-y (Math/tan (Math/toRadians (/ fovy 2.0))) %) u))))
+         origin (if ortho?
+                  (let [half-h (* 0.5 fovy)
+                        half-w (* half-h a)]
+                    (mapv + cam-pos
+                          (mapv #(* ndc-x half-w %) r)
+                          (mapv #(* ndc-y half-h %) u)))
+                  cam-pos)
+         dy (dir 1)
+         s (if (< dy -1e-4) (- (/ (- (origin 1)) dy)) 400.0)
+         x (+ (origin 0) (* s (dir 0)))
+         z (+ (origin 2) (* s (dir 2)))
+         clamp (fn [v] (max -70.0 (min 70.0 v)))]
+     [(clamp x) 0.0 (clamp z)])))
