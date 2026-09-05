@@ -131,3 +131,11 @@
           oc' (sea/step-ocean oc 0.1 nil)]
       (is (<= (Math/abs (-> oc' :particles first :x)) 10.0))
       (is (neg? (-> oc' :particles first :vx) ) "reflected inward"))))
+
+(deftest small-seas-sum-directly
+  (testing "at or under DIRECT-MAX particles the field is the direct Biot-Savart sum"
+    (let [oc (random-cloud sea/DIRECT-MAX 7)]
+      (is (= (sea/direct-velocities oc) (sea/velocities oc)))))
+  (testing "beyond DIRECT-MAX the FMM takes over"
+    (let [oc (random-cloud (inc sea/DIRECT-MAX) 9)]
+      (is (= (sea/fmm-velocities oc) (sea/velocities oc))))))

@@ -1,435 +1,333 @@
 (ns voxel.world
-  "Pure game simulation. The castle is rigid bodies from frame one — there is
-  no static voxel map, no freeze-back-into-grid, and no detach-on-blast.
-  Blasts destroy cells and split bodies along the rubble; voxel.physics owns
-  the real Box3D motion and reports plain-data facts that `apply-physics`
-  folds back in. Everything here is plain data + math, fully testable
-  headlessly.
+  "Pure naval battle state, per the plan: two voxel warships duel on the
+  particle ocean until one sinks.
 
-  Volume accounting is cell count: every body is a set of unit cubes, so a
-  body's volume is exactly its cell count however it is rotated, and the
-  destruction fraction is destroyed-cells / initial-cells."
-  )
+  The fleet is plain data. Each ship is a cell map posed with quaternion +
+  anchor (the voxel.buoyancy convention); voxel.physics owns the real Box3D
+  motion and reports plain-data facts that step-state folds back in. Shells
+  fly pure ballistics here — no physics body per shell — substepped so a
+  30 m/s round cannot tunnel a 1 m hull. A hit carves every cell within the
+  blast radius of the impact point; the exposed faces flood through
+  voxel.physics, the wreck settles lower, and a ship whose origin passes
+  SUNK-DEPTH under the waterline is sunk. The battle is over when one fleet
+  remains afloat.
+
+  The enemy is an AI that leads the player and fires on cooldown whenever a
+  ballistic solution exists. The ocean (voxel.ocean) steps in lockstep,
+  feeling every hull (displacement push + wake vorticity) and every blast
+  and splash (spray + swirl), so the sea is a first-class combatant rather
+  than scenery."
+  (:require [voxel.buoyancy :as buoy]
+            [voxel.ship :as ship]
+            [voxel.ocean :as sea]))
 
 (def GRAVITY 25.0)
 (def BALL-RADIUS 0.5)
-(def BALL-MIN-SPEED 18.0)
-(def BALL-MAX-SPEED 42.0)
-(def BALLS-PER-ROUND 5)
+(def SHELL-SPEED 30.0)
+(def FIRE-COOLDOWN 3.0)
 (def BLAST-RADIUS 2.6)
-(def SHATTER-SPEED 18.0)
-(def SETTLE-SPEED 0.15)
-(def SETTLE-SLOW-FRAMES 30)
-(def WIN-THRESHOLD 0.7)
-(def SETTLE-FRAMES-TO-LOSE 45)
-(def MUZZLE [0.0 3.0 22.0])
+(def SUNK-DEPTH 6.0)
+(def SHELL-LIFETIME 12.0)
+(def PLAYER-POS [0.0 -3.0 -14.0])
+(def ENEMY-POS [0.0 -3.0 14.0])
 
-;; --- aiming ------------------------------------------------------------
+;; --- fleet -----------------------------------------------------------------
 
-(defn dir-from-yaw-pitch
-  "Unit direction vector for yaw (0 = straight down -z, + = to +x) and pitch
-  (0 = level, + = up)."
-  [yaw pitch]
-  [(* (Math/cos pitch) (Math/sin yaw))
-   (Math/sin pitch)
-   (- (* (Math/cos pitch) (Math/cos yaw)))])
-
-(defn trajectory-points
-  "Ballistic sample points from pos with velocity v (step dt) until the arc
-  reaches y <= 0, for the aiming preview. Capped at 400 points. The real ball
-  flies in Box3D (voxel.physics); this only approximates the first arc."
-  [pos v dt]
-  (loop [x (pos 0) y (pos 1) z (pos 2)
-         vx (v 0) vy (v 1) vz (v 2)
-         pts []]
-    (let [vy' (- vy (* GRAVITY dt))
-          x'  (+ x (* vx dt))
-          y'  (+ y (* vy' dt))
-          z'  (+ z (* vz dt))
-          pts' (conj pts [x y z])]
-      (if (or (<= y' 0.0) (> (count pts') 400))
-        (conj pts' [x' y' z'])
-        (recur x' y' z' vx vy' vz pts')))))
-
-;; --- connectivity --------------------------------------------------------
-
-(defn components
-  "6-connected components of a voxel map, as a seq of sets of cells."
-  [voxels]
-  (let [seen (volatile! #{})
-        dirs [[1 0 0] [-1 0 0] [0 1 0] [0 -1 0] [0 0 1] [0 0 -1]]]
-    (for [cell (keys voxels)
-          :when (not (contains? @seen cell))
-          :let [comp (loop [frontier [cell] acc #{}]
-                        (if (empty? frontier)
-                          acc
-                          (let [c (peek frontier)
-                                acc' (conj acc c)]
-                            (vswap! seen conj c)
-                            (recur (into (pop frontier)
-                                         (filter #(and (contains? voxels %)
-                                                       (not (contains? acc' %)))
-                                                 (map #(mapv + c %) dirs)))
-                                   acc'))))]]
-      comp)))
-
-;; --- the castle level ----------------------------------------------------
-
-(defn- ring? [di dk] (or (zero? di) (= di 2) (zero? dk) (= dk 2)))
-
-(defn castle-parts
-  "The level as three disjoint parts — west tower (+crenels), curtain wall
-  (+crenels), east tower (+crenels). Each part becomes one rigid body spawned
-  asleep, so the standing castle costs nothing until disturbed but topples
-  for real once its support is blown out."
-  []
-  (let [oz -23
-        tower (fn [ox]
-                (into {}
-                      (for [di (range 3) dj (range 10) dk (range 3)
-                            :when (or (zero? dj) (ring? di dk))]
-                        [[(+ ox di) dj (+ oz dk)] (if (zero? dj) :stone-dark :stone)])))
-        crenel (fn [ox]
-                 (into {}
-                       (for [di (range 3) dk (range 3)
-                             :when (and (ring? di dk) (even? (+ di dk)))]
-                         [[(+ ox di) 10 (+ oz dk)] :gold])))
-        wall (into {}
-                   (for [i (range -4 5) dj (range 6)
-                         :when (not (and (< dj 2) (< (Math/abs i) 2)))]
-                     [[i dj -22] :stone]))
-        wall-crenel (into {}
-                          (for [i (range -4 5) :when (even? i)]
-                            [[i 6 -22] :gold]))]
-    [(merge (tower -7) (crenel -7))
-     (merge wall wall-crenel)
-     (merge (tower 5) (crenel 5))]))
-
-(defn- make-body
-  "A body record: cells relative to :anchor, :pos/:quat its live pose (equal
-  to the anchor/identity until physics reports otherwise)."
-  [id cells asleep]
-  (let [ks (keys cells)
-        cnt (count ks)
-        mean (fn [f] (/ (reduce + (map f ks)) cnt))
-        anchor [(double (+ (mean first) 0.5))
-                (double (+ (mean second) 0.5))
-                (double (+ (mean #(nth % 2)) 0.5))]]
+(defn make-ship
+  "A fleet record from a voxel.ship layout, posed at pos with the given
+  yaw (bow at +k in layout space)."
+  [id layout pos yaw]
+  (let [cells (:cells layout)]
     {:id id
+     :ai false
      :cells cells
-     :anchor anchor
+     :anchor (:anchor layout)
+     :guns (:guns layout)
+     :skin (buoy/skin-faces cells)
+     :faces (buoy/surface-faces cells)
+     :pos pos
+     :quat (buoy/yaw-quat yaw)
      :body nil
-     :pos anchor
-     :quat [0.0 0.0 0.0 1.0]
+     :vel [0.0 0.0 0.0]
      :speed 0.0
-     :asleep asleep}))
+     :cooldown 0.0
+     :sunk false}))
+
+(defn- calm-sea
+  "A still ocean patch: one particle per 2-unit tile over the domain."
+  []
+  (for [x (range -9.0 10.0 2.0) z (range -9.0 10.0 2.0)]
+    {:x x :z z :omega 0.0}))
 
 (defn initial-state
   []
-  (let [parts (castle-parts)
-        bodies (map-indexed (fn [i cells] (make-body (inc i) cells true)) parts)]
-    {:phase :playing
-     :bodies (vec bodies)
-     :body-seq (inc (count bodies))
-     :ball nil
-     :balls-left BALLS-PER-ROUND
-     :muzzle MUZZLE
-     :blast-radius BLAST-RADIUS
-      :initial-volume (reduce + (map (comp count :cells) bodies))
-      :destroyed-cells 0
-      :events []
-     :destruction 0.0
-     :settle-frames 0}))
+  {:phase :playing
+   :ships {:player (make-ship :player (ship/dreadnought) PLAYER-POS 0.0)
+           :enemy (assoc (make-ship :enemy (ship/dreadnought) ENEMY-POS Math/PI)
+                         :ai true)}
+   :shells []
+   :ocean (sea/make-ocean (calm-sea))
+   :time 0.0
+   :events []})
 
-;; --- scoring -------------------------------------------------------------
+;; --- gunnery ------------------------------------------------------------------
 
-(defn destruction-fraction
-  "Destroyed cells / initial cells. A cell counts as destroyed exactly once:
-  when a blast carves it, or when its body first breaks into rubble. Bodies
-  are unit cubes, so cell count is volume regardless of rotation."
-  [state]
-  (let [v0 (:initial-volume state)]
-    (if (zero? v0)
-      0.0
-      (min 1.0 (/ (double (or (:destroyed-cells state) 0)) v0)))))
+(defn- dist-sq
+  [a b]
+  (reduce + (map #(* % %) (map - a b))))
 
-;; --- blast ----------------------------------------------------------------
+(defn- muzzle-point
+  "World point of a gun cell's muzzle: the cell centre, a cell and a half up
+  so shells clear the turret."
+  [ship [i j k]]
+  (buoy/body-point->world ship [(+ i 0.5) (+ j 1.5) (+ k 0.5)]))
 
-(defn- split-into-bodies
-  "Re-body a hit body's surviving cells: one new body per 6-connected group.
-  Children inherit the parent's anchor and pose — world cell positions are
-  unchanged — and are awake with :body nil so voxel.physics spawns them
-  fresh (the old body's shapes cannot be removed in place)."
-  [parent remaining groups next-id]
-  (vec (map-indexed (fn [i group]
-                       {:id (+ next-id i)
-                        :cells (select-keys remaining group)
-                        :anchor (:anchor parent)
-                        :body nil
-                        :pos (:pos parent)
-                        :quat (:quat parent)
-                        :vel (:vel parent)
-                        :speed 0.0
-                        :asleep false
-                        :rubble (:rubble parent)})
-                     groups)))
+(defn- nearest-gun
+  [ship target]
+  (reduce (fn [a b]
+            (if (< (dist-sq (muzzle-point ship b) target)
+                   (dist-sq (muzzle-point ship a) target))
+              b a))
+          (:guns ship)))
 
-(defn blast-at
-  "Destroy every cell within `radius` of world point p across all bodies,
-  splitting hit bodies into their connected remains. Unhit bodies are passed
-  through untouched (keeping their physics body)."
-  [state p radius]
-  (let [[px py pz] p
-        r2 (* radius radius)
-        near? (fn [cell]
-                (let [[i j k] cell
-                      dx (- (+ i 0.5) px)
-                      dy (- (+ j 0.5) py)
-                      dz (- (+ k 0.5) pz)]
-                  (<= (+ (* dx dx) (* dy dy) (* dz dz)) r2)))
-        step (fn [st body]
-               (let [doomed (filter near? (keys (:cells body)))
-                     n (count doomed)]
-                 (if (zero? n)
-                   (update st :bodies conj body)
-                   (let [remaining (apply dissoc (:cells body) doomed)
-                         groups (components remaining)
-                         new-bodies (split-into-bodies body remaining groups (:body-seq st))]
-                     (-> st
-                         (update :bodies into new-bodies)
-                         (assoc :body-seq (+ (:body-seq st) (count new-bodies)))
-                          (update :hit-cells + n)
-                          ;; rubble cells were counted destroyed when they
-                          ;; first broke - carving them again is not more
-                          ;; destruction
-                          (update :destroyed-cells + (if (:rubble body) 0 n)))))))
-        seed (assoc state :bodies [] :hit-cells 0)
-        st (reduce step seed (:bodies state))
-        n (:hit-cells st)
-        st (dissoc st :hit-cells)
-        st (if (pos? n)
-             (update st :events conj (into [:blast] (conj (vec p) n)))
-             st)
-        st (assoc st :destruction (destruction-fraction st))]
-    (if (and (= :playing (:phase st))
-             (>= (:destruction st) WIN-THRESHOLD))
-      (assoc st :phase :won)
-      st)))
-
-;; --- cannonball -------------------------------------------------------------
+(defn- aim-velocity
+  "Muzzle velocity that lands a shell at target from p0 at the given speed:
+  the low-arc ballistic solution, nil when the target is out of range."
+  [p0 p1 speed]
+  (let [dx (- (p1 0) (p0 0)) dy (- (p1 1) (p0 1)) dz (- (p1 2) (p0 2))
+        d (Math/sqrt (+ (* dx dx) (* dz dz)))
+        s2 (* speed speed)
+        disc (- (* s2 s2) (* GRAVITY (+ (* GRAVITY d d) (* 2.0 dy s2))))]
+    (when (and (> d 1e-6) (>= disc 0.0))
+      (let [tan (/ (- s2 (Math/sqrt disc)) (* GRAVITY d))
+            cos (/ 1.0 (Math/sqrt (+ 1.0 (* tan tan))))
+            sin (* tan cos)]
+        [(* speed cos (/ dx d)) (* speed sin) (* speed cos (/ dz d))]))))
 
 (defn fire
-  "Launch a ball from the muzzle along unit `dir` with power in [0,1].
-  Returns the ball record with its launch velocity; voxel.physics spawns the
-  Box3D body. No-op unless playing, ball-free and with ammo left."
-  [state dir power]
-  (if (or (not= :playing (:phase state))
-          (some? (:ball state))
-          (zero? (:balls-left state)))
-    state
-    (let [len (Math/sqrt (reduce + (map #(* % %) dir)))
-          [dx dy dz] (map #(/ % len) dir)
-          speed (+ BALL-MIN-SPEED (* (- BALL-MAX-SPEED BALL-MIN-SPEED) power))
-          [mx my mz] (:muzzle state)]
+  "Fire the ship's nearest gun at target [x y z] on the low ballistic arc
+  for SHELL-SPEED. The state is returned unchanged when the battle is over,
+  the ship is sunk or cooling down, or no ballistic solution exists."
+  [state id target]
+  (let [s (get-in state [:ships id])]
+    (if (or (not= :playing (:phase state))
+            (:sunk s)
+            (pos? (or (:cooldown s) 0.0)))
+      state
+      (let [m (muzzle-point s (nearest-gun s target))
+            v (aim-velocity m target SHELL-SPEED)]
+        (if (nil? v)
+          state
+          (-> state
+              (update :shells conj {:owner id :pos m :vel v :t 0.0})
+              (assoc-in [:ships id :cooldown] FIRE-COOLDOWN)
+              (update :events conj {:type :fired :ship id})))))))
+
+(defn preview-arc
+  "Closed-form sample of the shot `fire` would take at target right now:
+  points from the muzzle to the first sea crossing, nil when the guns are
+  cooling or no ballistic solution exists. The aim reticle draws these."
+  [state id target]
+  (let [s (get-in state [:ships id])]
+    (when (and (= :playing (:phase state))
+               (not (:sunk s))
+               (not (pos? (or (:cooldown s) 0.0))))
+      (let [m (muzzle-point s (nearest-gun s target))
+            v (aim-velocity m target SHELL-SPEED)]
+        (when v
+          (loop [t 0.0 pts []]
+            (let [p [(+ (m 0) (* (v 0) t))
+                     (+ (m 1) (* (v 1) t) (* -0.5 GRAVITY t t))
+                     (+ (m 2) (* (v 2) t))]]
+              (if (or (<= (p 1) 0.0) (> t 8.0))
+                (conj pts p)
+                (recur (+ t 0.05) (conj pts p))))))))))
+
+;; --- shell flight ----------------------------------------------------------------
+
+(defn- world->local
+  "World point into the ship's grid coordinates — the inverse of
+  voxel.buoyancy/body-point->world."
+  [{:keys [pos quat anchor]} p]
+  (let [[qx qy qz qw] quat
+        d (mapv - p pos)
+        [rx ry rz] (buoy/q-rotate [(- qx) (- qy) (- qz) qw] d)]
+    (mapv + anchor [rx ry rz])))
+
+(defn- cell-at
+  "The hull cell containing world point p, if any."
+  [ship p]
+  (let [v (world->local ship p)]
+    [(int (Math/floor (v 0))) (int (Math/floor (v 1))) (int (Math/floor (v 2)))]))
+
+(defn- carve-ship
+  "The ship minus every cell whose world centre lies within radius of world
+  point p, with the doomed cells."
+  [ship p radius]
+  (let [r2 (* radius radius)
+        doomed (vec (for [[cell _] (:cells ship)
+                          :let [c (buoy/cell-center->world ship cell)]
+                          :when (<= (dist-sq c p) r2)]
+                      cell))]
+    (let [carved (update ship :cells #(apply dissoc % doomed))]
+      [(assoc carved :faces (buoy/surface-faces (:cells carved))) doomed])))
+
+(defn- shell-step
+  "Advance one shell one frame, substepped so a fast shell cannot tunnel a
+  1-cell hull. Returns [shell impacts]; the shell is nil once it is spent
+  (hit, splash, expired or way out of the arena)."
+  [ships shell dt]
+  (let [v (:vel shell)
+        speed (Math/sqrt (reduce + (map #(* % %) v)))
+        n (max 1 (long (Math/ceil (* speed dt 3.0))))
+        h (/ dt n)]
+    (loop [i 0 sh shell]
+      (if (= i n)
+        [sh []]
+        (let [sh (-> sh
+                     (update :pos (fn [p] (mapv + p (map #(* % h) (:vel sh)))))
+                     (update-in [:vel 1] - (* GRAVITY h))
+                     (update :t + h))
+              p (:pos sh)
+              struck (first (keep (fn [[id s]]
+                                    (when (and (not= id (:owner sh))
+                                               (not (:sunk s))
+                                               (contains? (:cells s) (cell-at s p)))
+                                      id))
+                                  ships))]
+          (cond
+            struck [nil [{:kind :hit :ship struck :point p}]]
+            (< (p 1) 0.0) [nil [{:kind :splash :point p}]]
+            (or (> (:t sh) SHELL-LIFETIME)
+                (> (Math/abs (p 0)) 80.0) (> (Math/abs (p 2)) 80.0))
+            [nil []]
+            :else (recur (inc i) sh)))))))
+
+(defn- apply-impact
+  "Fold one shell impact into the state: carve the hull (or splash the sea)
+  and feed the ocean a blast for the coupling."
+  [state {:keys [kind ship point]}]
+  (if (= :splash kind)
+    (-> state
+        (update :events conj {:type :splash :point point})
+        (update :blasts conj {:x (point 0) :z (point 2) :r 2.5 :power 4.0}))
+    (let [[carved doomed] (carve-ship (get-in state [:ships ship]) point BLAST-RADIUS)]
       (-> state
-          (assoc :ball {:origin [mx my mz]
-                        :v [(* dx speed) (* dy speed) (* dz speed)]
-                        :body nil
-                        :pos nil})
-          (update :balls-left dec)))))
+          (assoc-in [:ships ship] carved)
+          (update :events conj {:type :blast :ship ship :point point
+                                :destroyed (count doomed) :cells doomed})
+          (update :blasts conj {:x (point 0) :z (point 2) :r 3.5 :power 10.0})))))
 
-(defn ball-impact-cell
-  "The first occupied cell the sphere at pos with radius r overlaps, or nil.
-  A cell overlaps when the closest point of its unit cube to pos is within r."
-  [voxels pos r]
-  (let [[x y z] pos
-        lo [(int (Math/floor (- x r))) (int (Math/floor (- y r))) (int (Math/floor (- z r)))]
-        hi [(int (Math/floor (+ x r))) (int (Math/floor (+ y r))) (int (Math/floor (+ z r)))]
-        r2 (* r r)
-        overlap? (fn [i j k]
-                   (let [cx (max i (min x (+ i 1.0)))
-                         cy (max j (min y (+ j 1.0)))
-                         cz (max k (min z (+ k 1.0)))
-                         dx (- x cx) dy (- y cy) dz (- z cz)]
-                     (<= (+ (* dx dx) (* dy dy) (* dz dz)) r2)))]
-    (first (for [i (range (lo 0) (inc (hi 0)))
-                 j (range (lo 1) (inc (hi 1)))
-                 k (range (lo 2) (inc (hi 2)))
-                 :when (and (contains? voxels [i j k]) (overlap? i j k))]
-             [i j k]))))
+;; --- the enemy gunner --------------------------------------------------------------
 
-;; --- physics facts ---------------------------------------------------------
+(defn- aim-point
+  "Where an AI gunner aims: the foe's position one estimated flight-time
+  from now, raised to hull height."
+  [shooter foe]
+  (let [[tx ty tz] (:pos foe)
+        [vx _ vz] (or (:vel foe) [0.0 0.0 0.0])
+        [sx _ sz] (:pos shooter)
+        d (Math/sqrt (+ (* (- tx sx) (- tx sx)) (* (- tz sz) (- tz sz))))
+        t (/ d SHELL-SPEED)]
+    [(+ tx (* vx t)) (+ ty 1.0) (+ tz (* vz t))]))
+
+(defn- ai-engage
+  [st id]
+  (let [foe (first (remove :sunk (map val (dissoc (:ships st) id))))]
+    (if (nil? foe)
+      st
+      (fire st id (aim-point (get-in st [:ships id]) foe)))))
+
+(defn- ai-turn
+  [st]
+  (reduce (fn [st [id s]] (if (:ai s) (ai-engage st id) st)) st (:ships st)))
+
+;; --- stepping ---------------------------------------------------------------------
+
+(defn- fold-facts
+  "Fold one frame of voxel.physics body facts into the fleet, marking ships
+  whose origin has passed SUNK-DEPTH below the waterline as sunk."
+  [ships facts]
+  (let [by-body (into {} (map (juxt :body identity) (:bodies facts)))]
+    (into {} (map (fn [entry]
+                    (let [id (key entry)
+                          s (val entry)]
+                      [id (if-let [f (and (:body s) (get by-body (:body s)))]
+                            (let [moved (assoc s :pos (:pos f) :quat (:quat f)
+                                               :vel (or (:vel f) [0.0 0.0 0.0])
+                                               :speed (or (:speed f) 0.0))]
+                              (if (and (not (:sunk moved))
+                                       (< (second (:pos f)) (- SUNK-DEPTH)))
+                                (assoc moved :sunk true)
+                                moved))
+                            s)]))
+                  ships))))
+
+(defn- hulls-of
+  "The coupling each floating hull feeds the ocean: displacement push and
+  wake vorticity scaled by speed (a becalmed ship leaves still water)."
+  [st]
+  (for [[_ s] (:ships st) :when (not (:sunk s))]
+    (let [v (or (:speed s) 0.0)]
+      {:x ((:pos s) 0) :z ((:pos s) 2) :r 5.0
+       :push (* 0.6 v) :swirl (* 0.3 v)})))
+
+(defn- decide
+  "The battle is over once exactly one fleet is still afloat."
+  [st]
+  (if (not= :playing (:phase st))
+    st
+    (let [afloat (remove :sunk (vals (:ships st)))]
+      (if (= 1 (count afloat))
+        (assoc st :phase :over :winner (:id (first afloat)))
+        st))))
+
+(defn step-state
+  "Advance the battle dt seconds. facts is voxel.physics/step! output,
+  folded into the fleet first. Events accumulate (capped) for the HUD."
+  [state dt facts]
+  (let [ships (fold-facts (:ships state) facts)
+        sunk-now (keep (fn [[id s]]
+                         (when (and (:sunk s) (not (:sunk (get-in state [:ships id]))))
+                           {:type :sunk :ship id}))
+                       ships)
+        st (-> state
+               (assoc :ships ships)
+               (update :events into sunk-now)
+               (assoc :blasts []))
+        [shells impacts] (reduce (fn [[ss imps] sh]
+                                   (let [[sh' imps'] (shell-step ships sh dt)]
+                                     [(if sh' (conj ss sh') ss) (into imps imps')]))
+                                 [[] []] (:shells st))
+        st (reduce apply-impact (assoc st :shells shells) impacts)
+        st (ai-turn st)
+        st (update st :ships (fn [ss]
+                               (into {} (map (fn [[id s]]
+                                               [id (update s :cooldown #(max 0.0 (- % dt)))])
+                                             ss))))
+        ocean (sea/step-ocean (:ocean st) dt (:blasts st) (hulls-of st))]
+    (-> st
+        (assoc :ocean ocean)
+        (assoc :time (+ (or (:time st) 0.0) dt))
+        (update :events (fn [es] (vec (take-last 200 es))))
+        (dissoc :blasts)
+        decide)))
+
+;; --- physics wiring ---------------------------------------------------------------
 
 (defn attach-bodies
-  "Attach physics body ids to pending world bodies (keyed by world :id) and
-  to the ball, after voxel.physics spawned them."
-  [state {:keys [bodies ball]}]
-  (let [id->body bodies]
-    (cond-> state
-      (seq id->body)
-      (update :bodies (fn [bs]
-                        (mapv #(if-let [b (get id->body (:id %))]
-                                 (assoc % :body b)
-                                 %)
-                              bs)))
-
-      (and (some? ball) (some? (:ball state)))
-      (assoc-in [:ball :body] ball))))
+  "Attach Box3D body ids to the fleet after voxel.physics spawned them."
+  [state id->body]
+  (update state :ships
+          (fn [ss]
+            (into {} (map (fn [[id s]]
+                            [id (if-let [b (get id->body id)]
+                                  (assoc s :body b)
+                                  s)])
+                          ss)))))
 
 (defn live-body-ids
-  "Every Box3D body id still referenced by the world (the ball's and one per
-  attached body). voxel.physics destroys the rest."
+  "Every Box3D body id still referenced by the world. voxel.physics
+  destroys the rest."
   [state]
-  (let [ball-body (get-in state [:ball :body])]
-    (cond-> (into #{} (keep :body (:bodies state)))
-      (some? ball-body) (conj ball-body))))
-
-(defn- check-win
-  [state]
-  (if (and (= :playing (:phase state))
-           (>= (:destruction state) WIN-THRESHOLD))
-    (assoc state :phase :won)
-    state))
-
-(defn all-cells
-  "Union of every body's cells — the occupied-world map for ball collision."
-  [state]
-  (into {} (map :cells (:bodies state))))
-
-(defn- apply-ball-fact
-  "Fold the ball's physics fact into the world: impact blasts the structure,
-  ground/out-of-bounds/sleep despawns it, otherwise the position updates."
-  [state fact]
-  (cond
-    (nil? fact) (assoc state :ball nil)
-    (nil? (:ball state)) state
-    :else
-    (let [{:keys [pos asleep]} fact
-          [x y z] pos
-          hit (ball-impact-cell (all-cells state) pos BALL-RADIUS)]
-      (cond
-        hit (-> state
-                (assoc :ball nil)
-                (blast-at pos (:blast-radius state)))
-
-        (or asleep
-            (< y BALL-RADIUS) (> y 300.0)
-            (> (Math/abs x) 80.0) (> z 40.0) (< z -80.0))
-        (assoc state :ball nil)
-
-        :else (let [slow (if (< (:speed fact) SETTLE-SPEED)
-                           (inc (or (get-in state [:ball :slow]) 0))
-                           0)]
-                (if (>= slow SETTLE-SLOW-FRAMES)
-                  (assoc state :ball nil)
-                  (-> state
-                      (assoc-in [:ball :pos] pos)
-                      (assoc-in [:ball :slow] slow))))))))
-
-(defn- shatter-into
-  "Replace a body that hit too hard with one persistent rubble body per
-  cell at the impact pose: fallen blocks stay on the scene instead of
-  vanishing. Fragments inherit the impact velocity so the rubble sprays."
-  [body fact next-id]
-  (mapv (fn [i cell]
-          {:id (+ next-id i)
-           :cells {cell (get (:cells body) cell)}
-           :anchor (:anchor body)
-           :body nil
-           :pos (:pos fact)
-           :quat (:quat fact)
-           :vel (:vel fact)
-           :speed 0.0
-           :asleep false
-           :rubble true})
-        (range)
-        (keys (:cells body))))
-
-(defn- apply-body-facts
-  "Fold one frame of body facts into the world. A sudden speed drop past
-  SHATTER-SPEED breaks the body into per-cell rubble that persists (blocks
-  that fall down stay on the scene); a body resting below the ground plane
-  is a physics blow-through and is cleared. Otherwise the reported
-  transform is recorded — resting bodies simply stay bodies; nothing is
-  ever frozen back into a grid."
-  [state facts]
-  (if (empty? facts)
-    state
-    (let [by-body (into {} (map (juxt :body identity)) facts)
-          kept (volatile! [])
-          frags (volatile! [])
-          events (volatile! [])
-          next-id (volatile! (:body-seq state))
-          destroyed (volatile! 0)
-          shatter! (fn [b f]
-                     (when-not (:rubble b)
-                       (vswap! destroyed + (count (:cells b))))
-                     (vswap! events conj (into [:shatter]
-                                               (conj (vec (:pos f)) (count (:cells b))))))]
-      (doseq [b (:bodies state)]
-        (if-let [f (get by-body (:body b))]
-          (let [impact (- (or (:speed b) 0.0) (:speed f))]
-            (cond
-              (and (> impact SHATTER-SPEED) (> (count (:cells b)) 1))
-              (do (shatter! b f)
-                  (vswap! frags into (shatter-into b f @next-id))
-                  (vswap! next-id + (count (:cells b))))
-
-              ;; a body whose origin sank below the floor edge-on is a
-              ;; physics blow-through: clear it whatever its sleep
-              (< (second (:pos f)) -0.6)
-              (shatter! b f)
-
-              :else
-              (let [slow (if (< (:speed f) SETTLE-SPEED)
-                           (inc (or (:slow b) 0))
-                           0)
-                    ;; a long sub-threshold streak is settled stone even if
-                    ;; contact churn keeps the solver's awake flag on
-                    settled (and (not (:asleep f)) (>= slow SETTLE-SLOW-FRAMES))]
-                (when settled
-                  (vswap! events conj [:settle (:body b)]))
-                (vswap! kept conj (assoc b :pos (:pos f) :quat (:quat f)
-                                         :vel (:vel f)
-                                         :speed (:speed f) :slow slow
-                                         :asleep (or (:asleep f) settled))))))
-          (vswap! kept conj b)))
-      (let [base (assoc state
-                        :bodies (into @kept @frags)
-                        :body-seq @next-id
-                        :events (into (:events state) @events)
-                        :destroyed-cells (+ (or (:destroyed-cells state) 0) @destroyed))]
-        (check-win (if (pos? @destroyed)
-                     (assoc base :destruction (destruction-fraction base))
-                     base))))))
-
-(defn apply-physics
-  "Fold one frame of Box3D facts into the world. Facts are plain data as
-  reported by voxel.physics/step!: {:ball {:pos .. :speed .. :asleep ..} | nil,
-  :bodies [{:body .. :pos .. :quat .. :speed .. :asleep ..}]}."
-  [state {:keys [ball bodies]}]
-  (-> state
-      (apply-ball-fact ball)
-      (apply-body-facts bodies)))
-
-;; --- phase -------------------------------------------------------------------
-
-(defn tick
-  "Advance the world's phase bookkeeping one frame (win/lose/settle)."
-  [state]
-  (if (not= :playing (:phase state))
-    state
-    (let [quiet? (and (zero? (:balls-left state))
-                      (nil? (:ball state))
-                      (every? :asleep (:bodies state)))]
-      (cond
-        (>= (:destruction state) WIN-THRESHOLD)
-        (assoc state :phase :won)
-
-        quiet?
-        (let [n (inc (or (:settle-frames state) 0))]
-          (if (>= n SETTLE-FRAMES-TO-LOSE)
-            (assoc state :phase :lost :settle-frames n)
-            (assoc state :settle-frames n)))
-
-        :else (assoc state :settle-frames 0)))))
+  (into #{} (keep :body (vals (:ships state)))))

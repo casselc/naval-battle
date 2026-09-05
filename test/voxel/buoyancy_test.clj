@@ -102,6 +102,16 @@
       (is (near -0.75 (second (:centroid m))) "world height 3, CoB a quarter below the plane")
       (is (near -4.0 (nth (:centroid m) 2))))))
 
+(deftest submerged-pitched-half-box
+  (testing "a 90-degree pitch about +x: the plane is u_z = -0.25, cutting the k=1 layer"
+    ;; pitch pi/2 maps +z to -y, so world y = pos.y - u_z; the waterline sits at
+    ;; u_z = -0.25, k=2 is fully under (9), k=1 is 3/4 under (6.75), and larger
+    ;; u_z means deeper, so the CoB sits 0.625 below the anchor in u-space
+    (let [bod (body (box-cells 3 3 3) [3.0 -0.25 5.0] (b/pitch-quat (/ Math/PI 2.0)))
+          m (b/submerged-metrics bod)]
+      (is (near 15.75 (:volume m)))
+      (is (near-v [3.0 -0.875 5.0] (:centroid m))))))
+
 (deftest fully-submerged-tilted-hull-identity
   (testing "fully under water: displaced volume == cell count however the body tumbles"
     (let [theta (* 31.0 (/ Math/PI 180.0))

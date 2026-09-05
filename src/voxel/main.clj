@@ -3,39 +3,39 @@
   (:require [voxel.raylib :as rl]
             [voxel.input :as input]
             [voxel.world :as w]
-             [voxel.physics :as phys]
-             [voxel.render :as render]
-             [voxel.terrain :as terrain]))
+            [voxel.physics :as phys]
+            [voxel.render :as render]))
 
 (def WIDTH 960)
 (def HEIGHT 540)
-;; static scenery, computed once per launch (deterministic layout)
-(def scenery (terrain/scene))
 (def MAX-DEBRIS 240)
-(def EXPLOSION-STRENGTH 0.3)
-(def EXPLOSION-OVERREACH 0.5)
+(def EXPLOSION-STRENGTH 0.35)
 
-;; headless smoke: fire one scripted shot so a screenshot can capture impact
+;; headless smoke: fire one scripted shot so a screenshot can capture a hit
 (def ^:private autofire-frame
   (when-let [v (System/getenv "VOXEL_APP_AUTOFIRE")]
     (try (Integer/parseInt v) (catch Exception _ nil))))
 
 (defn- spawn-debris
+  "Blasts and splashes kick up debris and spray cubes."
   [debris events]
   (let [new (mapcat (fn [ev]
-                        (let [[_ x y z n] ev
-                              cnt (max 3 (min 12 (long (/ n 3))))]
-                          (map (fn [_]
-                                (let [a (/ (rl/get-random-value 0 628) 100.0)]
-                                  {:x (double x) :y (double y) :z (double z)
-                                   :vx (* 6.0 (Math/sin a))
-                                   :vy (+ 4.0 (rl/get-random-value 0 60) 0.0)
-                                   :vz (* 6.0 (Math/cos a))
-                                   :size 0.3
-                                   :color (rl/rgba 148 151 165 255)
-                                   :ttl (+ 0.7 (/ (rl/get-random-value 0 100) 100.0))}))
-                              (range cnt))))
-                     events)]
+                      (let [[x y z] (:point ev)
+                            water (= :splash (:type ev))
+                            cnt (max 3 (min 12 (or (:destroyed ev) 6)))]
+                        (map (fn [_]
+                               (let [a (/ (rl/get-random-value 0 628) 100.0)]
+                                 {:x (double x) :y (double y) :z (double z)
+                                  :vx (* 6.0 (Math/sin a))
+                                  :vy (+ 5.0 (rl/get-random-value 0 60) 0.0)
+                                  :vz (* 6.0 (Math/cos a))
+                                  :size 0.3
+                                  :color (if water
+                                           (rl/rgba 200 228 240 255)
+                                           (rl/rgba 148 151 165 255))
+                                  :ttl (+ 0.7 (/ (rl/get-random-value 0 100) 100.0))}))
+                             (range cnt))))
+                    events)]
     (into [] (take-last MAX-DEBRIS (into debris new)))))
 
 (defn- step-debris
@@ -47,23 +47,24 @@
                 (let [vy (- (:vy d) (* 12.0 dt))]
                   (-> d
                       (assoc :x (+ (:x d) (* (:vx d) dt))
-                             :y (+ (:y d) (* vy dt))
+                             :y (+ (:y d) (* (:vy d) dt))
                              :z (+ (:z d) (* (:vz d) dt))
                              :vy vy
                              :ttl (- (:ttl d) dt)))))))
         debris))
 
 (defn- end-screen
-  "Which screen are we on: :title at first, :end when the round is over."
+  "Which screen are we on: :title at first, :end when the battle is decided."
   [screen world]
   (cond
     (= :title screen) :title
-    (contains? #{:won :lost} (:phase world)) :end
+    (= :over (:phase world)) :end
     :else :game))
 
 (defn -main
   [& _]
-  (rl/window! :width WIDTH :height HEIGHT :title "voxel siege - divergence theorem sandbox")
+  (rl/window! :width WIDTH :height HEIGHT
+              :title "naval battle - voxel warships on a particle ocean")
   (rl/set-target-fps 60)
   (phys/init!)
   (let [deadline (rl/auto-quit-deadline)
@@ -72,107 +73,83 @@
            world (w/initial-state)
            ;; smoke mode (VOXEL_APP_AUTOFIRE) skips the title screen
            screen (if autofire-frame :game :title)
-           ui {:charging false :charge-t 0.0 :aim [0.0 0.4] :mx (/ WIDTH 2) :my (/ HEIGHT 2)}
            debris []
-           consumed 0]
+           consumed 0
+           ttotal 0.0]
       (if (rl/keep-running? deadline)
-         (let [;; raylib reports real frame time; shader compiles, GC and window
-                ;; drags spike it to 0.1s+, which tunnels bodies through the
-                ;; ground. Box3D is only stable with bounded dt.
-                dt (min 0.033 (double (rl/get-frame-time)))
-              in (input/snapshot WIDTH HEIGHT)
-              ;; title/end: any click or R restarts the round
-              restart-now (or (and (not= :game screen) (or (:pressed? in) (:restart? in)))
-                              (and (= :game screen) (:restart? in)))
-               world (if restart-now (w/initial-state) world)
+        (let [;; raylib reports real frame time; shader compiles, GC and
+               ;; window drags spike it to 0.1s+, which tunnels shells
+               ;; through hulls. Both Box3D and the shell integrator want
+               ;; bounded dt.
+               dt (min 0.033 (double (rl/get-frame-time)))
+               in (input/snapshot WIDTH HEIGHT)
+               ;; title/end: any click or R restarts the round
+               restart-now (or (and (not= :game screen)
+                                    (or (:pressed? in) (:restart? in)))
+                               (and (= :game screen) (:restart? in)))
                _ (when restart-now (phys/init!))
+               world (if restart-now (w/initial-state) world)
                screen (if restart-now :game screen)
                consumed (if restart-now 0 consumed)
-              ;; charging state machine (game screen only)
-              can-charge? (and (= :game screen) (nil? (:ball world))
-                               (pos? (:balls-left world))
-                               (= :playing (:phase world)))
-              charging (cond
-                         (and can-charge? (:pressed? in)) true
-                         (not (:down? in)) false
-                         :else (:charging ui))
-              charge-t (cond
-                         (not charging) 0.0
-                         (:pressed? in) 0.0
-                         :else (+ (:charge-t ui) dt))
-               ;; scripted smoke-test shot fires all by itself
-               autofire? (and (= frame autofire-frame) (= :game screen) can-charge?)
-               ;; on the release frame `charging` is already false and `charge-t`
-               ;; already reset, so the shot must read BOTH from last frame's ui
-               ;; (:pressed? also covers a tap released within one frame)
-               fire-now (or (and (or (:charging ui) (:pressed? in))
+               aim (input/sea-point (:mx in) (:my in) WIDTH HEIGHT
+                                    render/CAMERA-POS render/CAMERA-TARGET
+                                    render/FOVY)
+               ;; scripted smoke-test shot: one salvo at the enemy
+               autofire? (and (= frame autofire-frame) (= :game screen))
+               fire-target (if autofire?
+                             (let [e (get-in world [:ships :enemy :pos])]
+                               [(e 0) (+ (e 1) 1.0) (e 2)])
+                             aim)
+               fire-now (or autofire?
+                            (and (= :game screen)
                                  (:released? in)
-                                 can-charge?)
-                            autofire?)
-               power (if autofire?
-                       0.9
-                       (max 0.15 (input/power-from-charge (:charge-t ui))))
-              aim (if autofire? [0.0 0.40] (:aim in))
-              world (if fire-now
-                      (w/fire world (apply w/dir-from-yaw-pitch aim) power)
-                      world)
-              ;; the new ball gets a Box3D body before stepping
-              ball-body (when (and fire-now (:ball world))
-                          (phys/spawn-ball! (:origin (:ball world)) (:v (:ball world))))
-              world (if ball-body
-                      (w/attach-bodies world {:ball ball-body})
-                      world)
-              ;; physics: step Box3D, fold the facts into the world
-              facts (phys/step! dt)
-              world' (w/apply-physics world facts)
-               ;; spawn bodies still without a physics body: the sleeping
-               ;; castle parts on frame zero, blast-split children after
-              pending (into {}
-                            (keep (fn [ch]
-                                    (when (nil? (:body ch))
-                                      [(:id ch)
-                                       (phys/spawn-body! (:pos ch) (:quat ch) (if (:asleep ch) 0 1) (:anchor ch) (keys (:cells ch)) (:vel ch))])))
-                             (:bodies world))
-               world' (if (seq pending)
-                        (w/attach-bodies world' {:bodies pending})
-                       world')
-              ;; radial impulse for any blast this frame - reaches past the
-              ;; destroyed zone so surviving neighbours get shoved
-               _ (doseq [ev (drop consumed (:events world'))
-                         :when (= :blast (first ev))]
-                   (phys/explode! (subvec (vec ev) 1 4)
-                                  (+ (:blast-radius world') EXPLOSION-OVERREACH)
-                                  EXPLOSION-STRENGTH))
-               ;; bodies the world declared settled: put them (and their
-               ;; contact island) to sleep so the solver stops churning
-               _ (doseq [ev (drop consumed (:events world'))
-                         :when (= :settle (first ev))]
-                   (phys/sleep-body! (second ev)))
-              _ (phys/destroy-unreferenced! (w/live-body-ids world'))
-              world' (w/tick world')
-              ;; :events is an ever-growing log - spawn only the entries this
-              ;; frame added, or every past hit re-spawns particles forever
-               fresh-events (filter #(= :blast (first %)) (drop consumed (:events world')))
-              debris' (-> debris
-                          (spawn-debris fresh-events)
-                          (step-debris dt))
-              consumed' (count (:events world'))
-              ui (assoc ui
-                        :charging charging
-                        :charge-t charge-t
-                        :aim (:aim in)
-                        :mx (:mx in) :my (:my in))]
-           (render/draw-frame! {:world world' :ui ui :debris debris' :terrain scenery
+                                 (= :playing (:phase world))))
+               world (if fire-now (w/fire world :player fire-target) world)
+               ;; physics: step Box3D, fold the facts into the battle
+               facts (phys/step! dt)
+               world (w/step-state world dt facts)
+               ;; ships still without a physics body: frame zero, or a
+               ;; restart just rebuilt the fleet
+               pending (into {}
+                             (keep (fn [entry]
+                                     (let [id (key entry)
+                                           s (val entry)]
+                                       (when (nil? (:body s))
+                                         [id (phys/spawn-body! (:pos s) (:quat s) 1
+                                                               (:anchor s)
+                                                               (keys (:cells s)))]))))
+                             (:ships world))
+               world (if (seq pending)
+                       (w/attach-bodies world pending)
+                       world)
+               ;; fresh blasts: shove the hulls, and open their recorded
+               ;; meshes so they start taking on water immediately
+               _ (doseq [ev (drop consumed (:events world))
+                         :when (= :blast (:type ev))
+                         :let [body-id (get-in world [:ships (:ship ev) :body])]]
+                   (phys/explode! (:point ev) (+ w/BLAST-RADIUS 0.5)
+                                  EXPLOSION-STRENGTH)
+                   (when body-id
+                     (phys/damage-cells! body-id (:cells ev))))
+               _ (phys/destroy-unreferenced! (w/live-body-ids world))
+               fresh (filter #(contains? #{:blast :splash} (:type %))
+                             (drop consumed (:events world)))
+               debris' (step-debris (spawn-debris debris fresh) dt)
+               consumed' (count (:events world))]
+          (render/draw-frame! {:world world
+                               :ui {:aim aim :mx (:mx in) :my (:my in)}
+                               :debris debris'
                                :width WIDTH :height HEIGHT
-                               :screen (end-screen screen world')})
+                               :screen (end-screen screen world)})
           (rl/maybe-screenshot! frame 150)
           (vreset! summary {:frame frame
-                            :destruction (:destruction world')
-                            :events (mapv first (:events world'))
+                            :phase (:phase world)
+                            :winner (:winner world)
+                            :events (mapv :type (:events world))
                             :debris (count debris')
-                            :phase (:phase world')})
-          (recur (inc frame) world' screen ui debris' consumed'))
+                            :avg-frame-ms (when (pos? frame)
+                                            (double (* 1000.0 (/ ttotal frame))))})
+          (recur (inc frame) world screen debris' consumed' (+ ttotal dt)))
         (when autofire-frame
-          (println "[voxel] smoke summary:" (pr-str @summary)))))
+          (println "[voxel] smoke summary:" (pr-str @summary))))))
   (rl/close-window))
-)

@@ -16,7 +16,7 @@
             [voxel.buoyancy :as buoy]
             [voxel.world :as w]))
 
-(def ^:private CELL-DENSITY 2.0)
+(def ^:private CELL-DENSITY 1.8)
 (def ^:private CELL-FRICTION 0.8)
 (def ^:private CELL-RESTITUTION 0.05)
 (def ^:private BALL-DENSITY 61.1)
@@ -68,10 +68,14 @@
                     0.49 0.49 0.49 CELL-DENSITY CELL-FRICTION CELL-RESTITUTION))
      (when vel
        (b3/set-velocity! id (vel 0) (vel 1) (vel 2)))
-     (vswap! bodies* assoc id {:cells (zipmap cells (repeat :cell))
-                               :anchor anchor
-                               :skin (buoy/skin-faces (zipmap cells (repeat :cell)))
-                               :flood 0.0})
+     (let [live (zipmap cells (repeat :cell))
+           {:keys [tris faces]} (buoy/surface-cache live anchor)]
+       (vswap! bodies* assoc id {:cells live
+                                 :anchor anchor
+                                 :skin (buoy/skin-faces live)
+                                 :tris tris
+                                 :faces faces
+                                 :flood 0.0}))
      id)))
 
 (defn damage-cells!
@@ -81,8 +85,14 @@
   The collision shape is untouched - the world layer owns body lifecycles."
   [id cells]
   (when-let [rec (get @bodies* id)]
-    (vswap! bodies* update-in [id :cells]
-            (fn [live] (reduce dissoc live cells)))))
+    (vswap! bodies* update-in [id]
+            (fn [live]
+              (let [live' (reduce dissoc (:cells live) cells)
+                    {:keys [tris faces]} (buoy/surface-cache live' (:anchor live))]
+                (-> live
+                    (assoc :cells live')
+                    (assoc :tris tris)
+                    (assoc :faces faces)))))))
 
 (defn explode!
   "Radial impulse at [x y z] reaching `radius` (decaying to zero over
@@ -117,6 +127,8 @@
      :anchor (:anchor rec)
      :cells (:cells rec)
      :skin (:skin rec)
+     :tris (:tris rec)
+     :faces (:faces rec)
      :flood (:flood rec)}))
 
 (defn- drive-floatation!

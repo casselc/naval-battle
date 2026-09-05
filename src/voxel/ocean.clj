@@ -104,23 +104,34 @@
 
 (defn direct-velocities
   "Every particle's velocity from the full O(N^2) Biot-Savart sum, as
-  [[ux 0.0 uz] ...]. Self terms excluded."
+  [[ux 0.0 uz] ...]. Self terms excluded.
+
+  Written as a primitive component loop: with zeta = x - i.z and
+  q_j = i.omega_j/2pi, q_j/(zeta_i - zeta_j) works out to
+  [-omega_j (z_i - z_j), omega_j (x_i - x_j)] / (2pi r^2) - no complex
+  helpers, no per-pair allocation."
   [oc]
   (let [ps (:particles oc)
-        qs (charges ps)
-        zetas (mapv conj-zeta ps)
-        n (count ps)]
+        n (count ps)
+        xs (mapv :x ps)
+        zs (mapv :z ps)
+        ks (mapv (fn [p] (/ (:omega p) (* 2.0 Math/PI))) ps)]
     (mapv (fn [i]
-            (let [zi (zetas i)]
-              (loop [j 0 f [0.0 0.0]]
+            (let [xi (xs i) zi (zs i)]
+              (loop [j 0 fx 0.0 fz 0.0]
                 (if (== j n)
-                  [(f 0) 0.0 (f 1)]
+                  [fx 0.0 fz]
                   (if (== j i)
-                    (recur (inc j) f)
-                    (let [dz (c+ zi (c-neg (zetas j)))]
-                      (if (< (c-abs dz) 1e-12)
-                        (recur (inc j) f)
-                        (recur (inc j) (c+ f (c* (qs j) (c-inv dz)))))))))))
+                    (recur (inc j) fx fz)
+                    (let [dx (- xi (xs j))
+                          dz (- zi (zs j))
+                          r2 (+ (* dx dx) (* dz dz))]
+                      (if (< r2 1e-24)
+                        (recur (inc j) fx fz)
+                        (let [k (ks j)]
+                          (recur (inc j)
+                                 (- fx (/ (* k dz) r2))
+                                 (+ fz (/ (* k dx) r2)))))))))))
           (range n))))
 
 ;; --- quadtree ------------------------------------------------------------------------
@@ -182,7 +193,7 @@
   (and (<= (Math/abs (- (:cx c1) (:cx c2))) (+ (:h c1) (:h c2) 1e-12))
        (<= (Math/abs (- (:cz c1) (:cz c2))) (+ (:h c1) (:h c2) 1e-12))))
 
-(def ^:dynamic *sep-units* 4.0)
+(def ^:dynamic *sep-units* 2.0)
 
 (defn- sep-units
   "Chebyshev centre separation of two same-level cells, in units of their
@@ -368,20 +379,27 @@
                        {} levels)
         ;; --- evaluation: local expansion + near-field direct
         leaves (filterv :leaf cells)
+        ;; neighbour index lists are a property of the LEAF, not the
+        ;; particle: compute them once per leaf or the adjacency scan runs
+        ;; leaves x leaves per particle and swamps everything
+        leaf-nbrs (into {} (map (fn [leaf]
+                                  [(:path leaf)
+                                   (vec (mapcat :idxs
+                                                (filter (fn [o] (adjacent-leaves? bounds leaf o))
+                                                        leaves)))])
+                                leaves))
         out (object-array (count ps))
         near-sum (fn [leaf i zi]
                    (let [b (get locals (:path leaf))
                          c (ccenter bounds (:path leaf))
                          far (eval-local b c zi p)
-                         nbrs (filter (fn [o] (adjacent-leaves? bounds leaf o)) leaves)]
-                     (reduce (fn [f o]
-                               (reduce (fn [f j]
-                                         (let [dz (c+ zi (c-neg (zetas j)))]
-                                           (if (or (== j i) (< (c-abs dz) 1e-12))
-                                             f
-                                             (c+ f (c* (qs j) (c-inv dz))))))
-                                       f (:idxs o)))
-                             far nbrs)))]
+                         js (get leaf-nbrs (:path leaf))]
+                     (reduce (fn [f j]
+                               (let [dz (c+ zi (c-neg (zetas j)))]
+                                 (if (or (== j i) (< (c-abs dz) 1e-12))
+                                   f
+                                   (c+ f (c* (qs j) (c-inv dz))))))
+                             far js)))]
     (doseq [leaf leaves]
       (doseq [i (:idxs leaf)]
         (let [w (near-sum leaf i (zetas i))]
@@ -446,6 +464,17 @@
       (assoc p :y 0.0 :vy 0.0)
       (assoc p :y y :vy vy))))
 
+(def DIRECT-MAX 220)
+
+(defn velocities
+  "The velocity field however it is cheapest at this sea size: the direct
+  O(N^2) Biot-Savart sum below DIRECT-MAX particles, the FMM above it (the
+  quadtree passes are pure overhead on a small sea)."
+  [oc]
+  (if (<= (count (:particles oc)) DIRECT-MAX)
+    (direct-velocities oc)
+    (fmm-velocities oc)))
+
 (defn step-ocean
   "Advance the ocean dt seconds. blasts and hulls are this frame's couplings
   from the world (see apply-blasts / apply-hulls)."
@@ -455,7 +484,7 @@
    (let [ps (-> (:particles oc)
                 (apply-blasts blasts)
                 (apply-hulls hulls))
-         field (fmm-velocities (assoc oc :particles ps))
+         field (velocities (assoc oc :particles ps))
          vis (or (:viscosity oc) VISCOSITY)
          b (:bounds oc)
          drag (Math/pow IMPULSE-DRAG dt)

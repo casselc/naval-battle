@@ -3,7 +3,10 @@
   floats voxel bodies at their draft, breaches flood and sink, and every
   floating body is driven independently (multi-shell crews of bodies)."
   (:require [clojure.test :refer [deftest is testing]]
-            [voxel.physics :as phys]))
+            [voxel.physics :as phys]
+            [voxel.ship :as ship]
+            [voxel.world :as w]
+            [voxel.buoyancy :as buoy]))
 
 (def ^:private raft
   "2x1x3 cell hull section."
@@ -55,3 +58,15 @@
           yb (body-y facts b)]
       (is (and ya yb) "both bodies reported")
       (is (< (Math/abs (- ya yb)) 0.1) "twin hulls ride at the same waterline"))))
+
+(deftest warships-ride-at-their-waterline
+  (phys/init!)
+  (let [layout (ship/dreadnought)
+        id (phys/spawn-body! [0.0 -3.0 0.0] (buoy/yaw-quat 0.0) 1
+                             (:anchor layout) (keys (:cells layout)))
+        y1 (body-y (settle 10.0 0.05) id)
+        y2 (body-y (settle 10.0 0.05) id)]
+    (is (< y1 -2.6) "three of four hull levels are under - a warship's draft")
+    (is (> y1 -5.0) "the top hull level and deck ride dry, well above SUNK-DEPTH")
+    (is (< (Math/abs (- y2 y1)) 0.5)
+        "holds its waterline - no foundering without a breach")))
