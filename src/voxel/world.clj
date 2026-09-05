@@ -28,8 +28,10 @@
 (def BLAST-RADIUS 2.6)
 (def SUNK-DEPTH 6.0)
 (def SHELL-LIFETIME 12.0)
-(def PLAYER-POS [0.0 -3.0 -14.0])
-(def ENEMY-POS [0.0 -3.0 14.0])
+;; 44 units apart: beyond the 36-unit low-arc gun range (v^2/g), so the
+;; fleets must close in before the guns can speak
+(def PLAYER-POS [0.0 -3.0 -22.0])
+(def ENEMY-POS [0.0 -3.0 22.0])
 
 ;; --- fleet -----------------------------------------------------------------
 

@@ -32,7 +32,15 @@
     :pressed? (rl/mouse-pressed? rl/MOUSE-LEFT)
     :down? (rl/mouse-down? rl/MOUSE-LEFT)
     :released? (rl/mouse-released? rl/MOUSE-LEFT)
-    :restart? (rl/key-pressed? rl/KEY-R)})
+    :restart? (rl/key-pressed? rl/KEY-R)
+    ;; helm: [thrust turn]. Up/Down drive ahead/astern along the bow,
+    ;; Left/Right yaw to port/starboard.
+    :helm [(cond (rl/key-down? rl/KEY-UP) 1.0
+                 (rl/key-down? rl/KEY-DOWN) -1.0
+                 :else 0.0)
+           (cond (rl/key-down? rl/KEY-RIGHT) 1.0
+                 (rl/key-down? rl/KEY-LEFT) -1.0
+                 :else 0.0)]})
 
 (defn- cross3
   [[ax ay az] [bx by bz]]

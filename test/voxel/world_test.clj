@@ -75,7 +75,8 @@
 
 (deftest shells-carve-the-hull-where-they-land
   (let [st (w/fire (rigged) :player [0.0 1.0 14.0])
-        hist (cruise st 40 0.1)
+        ;; 6 s window: the enemy's second salvo (3 s cooldown) must land
+        hist (cruise st 60 0.1)
         final (peek hist)]
     (is (empty? (:shells final)) "the shell is spent on the enemy")
     (is (< (count (get-in final [:ships :enemy :cells]))
@@ -136,3 +137,10 @@
     (is (= 101 (get-in st [:ships :player :body])))
     (is (= 102 (get-in st [:ships :enemy :body])))
     (is (= #{101 102} (w/live-body-ids st)))))
+
+(deftest fleets-spawn-out-of-gun-range
+  (let [p (get-in (w/initial-state) [:ships :player :pos])
+        e (get-in (w/initial-state) [:ships :enemy :pos])
+        d (Math/sqrt (reduce + (map #(* % %) (map - p e))))]
+    (is (>= d 40.0)
+        "fleets start beyond the 36-unit low-arc gun range - sail in to engage")))

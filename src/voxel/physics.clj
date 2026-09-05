@@ -94,6 +94,34 @@
                     (assoc :tris tris)
                     (assoc :faces faces)))))))
 
+(def ^:private ENGINE-FORCE 6000.0)  ; ~8 u/s flat out against 0.6 damping
+(def ^:private RUDDER-FORCE 1500.0)  ; bow/stern couple, ~25 deg/s of yaw
+(def ^:private RUDDER-ARM 11.0)      ; half the keel, about the anchor
+
+(defn steer!
+  "Helm command for one step: thrust -1..1 drives the hull along its bow
+  axis (local +k, the bow), turn -1..1 yaws it via a rudder force couple at
+  bow and stern (right helm swings the bow to starboard, +x at identity
+  yaw). The default Box3D hull damping is the water resistance that caps
+  both speed and turn rate."
+  [id thrust turn]
+  (when (get @bodies* id)
+    (let [[pos quat] (b3/transform id)
+          [px py pz] pos
+          fwd (buoy/q-rotate quat [0.0 0.0 1.0])
+          push (fn [f p]
+                 (b3/apply-force! id (f 0) (f 1) (f 2)
+                                  (+ px (p 0)) (+ py (p 1)) (+ pz (p 2)) true))]
+      (when (not (zero? thrust))
+        (push (mapv #(* thrust ENGINE-FORCE %) fwd) [0.0 0.0 0.0]))
+      (when (not (zero? turn))
+        (let [side (buoy/q-rotate quat [1.0 0.0 0.0])
+              f (mapv #(* turn RUDDER-FORCE %) side)
+              bow (buoy/q-rotate quat [0.0 0.0 RUDDER-ARM])
+              stern (buoy/q-rotate quat [0.0 0.0 (- RUDDER-ARM)])]
+          (push f bow)
+          (push (mapv - f) stern))))))
+
 (defn explode!
   "Radial impulse at [x y z] reaching `radius` (decaying to zero over
   EXPLOSION-FALLOFF beyond it)."

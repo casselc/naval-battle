@@ -16,6 +16,13 @@
   (when-let [v (System/getenv "VOXEL_APP_AUTOFIRE")]
     (try (Integer/parseInt v) (catch Exception _ nil))))
 
+;; headless smoke: scripted helm "thrust,turn" so scripted runs can show
+;; ships underway without a keyboard
+(def ^:private smoke-helm
+  (when-let [v (System/getenv "VOXEL_APP_HELM")]
+    (try (mapv #(Double/parseDouble %) (clojure.string/split v #","))
+         (catch Exception _ nil))))
+
 (defn- spawn-debris
   "Blasts and splashes kick up debris and spray cubes."
   [debris events]
@@ -105,6 +112,15 @@
                                  (:released? in)
                                  (= :playing (:phase world))))
                world (if fire-now (w/fire world :player fire-target) world)
+               ;; the helm: arrow keys drive the player's hull (the smoke
+               ;; env overrides the keyboard so scripted runs can steer)
+               helm (or smoke-helm (:helm in))
+               player-body (get-in world [:ships :player :body])
+               _ (when (and player-body
+                            (= :game screen)
+                            (= :playing (:phase world))
+                            (not (get-in world [:ships :player :sunk])))
+                   (phys/steer! player-body (helm 0) (helm 1)))
                ;; physics: step Box3D, fold the facts into the battle
                facts (phys/step! dt)
                world (w/step-state world dt facts)

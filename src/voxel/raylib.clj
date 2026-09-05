@@ -292,6 +292,8 @@
 ;; --- constants (raylib KeyboardKey / MouseButton) ----------------------------
 (def ^:const KEY-SPACE 32)  (def ^:const KEY-R     82)
 (def ^:const KEY-ESCAPE 256) (def ^:const KEY-ENTER 257)
+(def ^:const KEY-RIGHT 262) (def ^:const KEY-LEFT 263)
+(def ^:const KEY-DOWN 264)  (def ^:const KEY-UP 265)
 (def ^:const MOUSE-LEFT 0)
 (def ^:const MOUSE-RIGHT 1)
 

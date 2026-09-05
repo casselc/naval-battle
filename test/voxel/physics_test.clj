@@ -70,3 +70,47 @@
     (is (> y1 -5.0) "the top hull level and deck ride dry, well above SUNK-DEPTH")
     (is (< (Math/abs (- y2 y1)) 0.5)
         "holds its waterline - no foundering without a breach")))
+
+;; --- helm: arrow-key steering ------------------------------------------------------
+
+(defn- sail
+  "Step physics total seconds, steering the body every step. Returns the
+  final facts map."
+  [id total dt thrust turn]
+  (loop [t 0.0 facts nil]
+    (if (>= t total)
+      facts
+      (do (phys/steer! id thrust turn)
+          (recur (+ t dt) (phys/step! dt))))))
+
+(defn- body-fact
+  [facts id]
+  (first (filter #(= id (:body %)) (:bodies facts))))
+
+(defn- yaw-of
+  "Heading about +y from the body quaternion."
+  [fact]
+  (let [[_ qy _ qw] (:quat fact)]
+    (* 2.0 (Math/atan2 qy qw))))
+
+(deftest helm-drives-the-ship-along-its-bow
+  (phys/init!)
+  (let [layout (ship/dreadnought)
+        id (phys/spawn-body! [0.0 -3.0 0.0] (buoy/yaw-quat 0.0) 1
+                             (:anchor layout) (keys (:cells layout)))
+        z0 (get-in (body-fact (settle 8.0 0.05) id) [:pos 2])
+        f (body-fact (sail id 5.0 0.05 1.0 0.0) id)]
+    (is (> (- (get-in f [:pos 2]) z0) 4.0)
+        "full ahead carries the ship several units along its bow axis")
+    (is (< (Math/abs (get-in f [:pos 0])) 4.0)
+        "no helm, no crab (a little trim from the aft-heavy CoM is fine)")
+    (is (< -5.0 (get-in f [:pos 1]) -1.0) "still riding its waterline underway")))
+
+(deftest helm-turns-the-ship-to-starboard
+  (phys/init!)
+  (let [layout (ship/dreadnought)
+        id (phys/spawn-body! [0.0 -3.0 0.0] (buoy/yaw-quat 0.0) 1
+                             (:anchor layout) (keys (:cells layout)))]
+    (settle 8.0 0.05)
+    (is (> (yaw-of (body-fact (sail id 3.0 0.05 0.0 1.0) id)) 0.15)
+        "right helm swings the bow toward +x (starboard)")))

@@ -286,7 +286,7 @@
     (draw-crosshair! (:mx ui) (:my ui)))
   (when (= :title screen)
     (draw-overlay! "NAVAL BATTLE"
-                   "click to start - sink the enemy dreadnought" width height))
+                   "click to start - arrows steer, click to fire - sink the enemy dreadnought" width height))
   (when (= :end screen)
     (if (= :player (:winner world))
       (draw-overlay! "VICTORY"
