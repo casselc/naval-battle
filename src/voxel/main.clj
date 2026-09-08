@@ -28,6 +28,14 @@
   (when-let [v (System/getenv "VOXEL_APP_FPS")]
     (try (Integer/parseInt v) (catch Exception _ nil))))
 
+;; headless smoke: which frame RAYLIB_APP_SHOT captures. The default lands
+;; while the fleets are still working up to speed, which is no use for
+;; looking at wakes.
+(def ^:private shot-frame
+  (or (when-let [v (System/getenv "VOXEL_APP_SHOT_FRAME")]
+        (try (Integer/parseInt v) (catch Exception _ nil)))
+      150))
+
 ;; headless smoke: scripted helm "thrust,turn" so scripted runs can show
 ;; ships underway without a keyboard
 (def ^:private smoke-helm
@@ -205,7 +213,7 @@
                                :debris debris'
                                :width WIDTH :height HEIGHT
                                :screen (end-screen screen world)})
-          (rl/maybe-screenshot! frame 150)
+          (rl/maybe-screenshot! frame shot-frame)
            (when-let [s @shot*]
              (vreset! shot* nil)
              (rl/screenshot! s))

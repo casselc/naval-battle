@@ -684,8 +684,10 @@ static void sim_velocities(void)
 }
 
 // vsea_sim_step(dt, blasts, nb, hulls, nh): one ocean step.
-// blasts pack (x, z, r, power); hulls pack (x, z, r, push, swirl, hx, hz)
-// where (hx, hz) is the hull's heading.
+// blasts pack (x, z, r, power); hulls pack
+// (x, z, r, hull_r, push, lift, swirl, displace, hx, hz).
+// See voxel.ocean/apply-hulls for what each hull term means - this is the
+// same arithmetic in the same order.
 // The order matches voxel.ocean/step-ocean exactly: couplings, ambient
 // forcing, the field solve, then advection and the vertical oscillator.
 void vsea_sim_step(double dt, const double *blasts, int64_t nb,
@@ -709,22 +711,30 @@ void vsea_sim_step(double dt, const double *blasts, int64_t nb,
 		}
 	}
 	for (int64_t hh = 0; hh < nh; hh++) {
-		const double *h = hulls + hh * 7;
+		const double *h = hulls + hh * 10;
 		double cx = h[0], cz = h[1], hr = h[2];
-		double push = h[3], swirl = h[4];
-		double bx = h[5], bz = h[6];   // heading: signs the wake's swirl
+		double r0 = h[3] > 0.0 ? h[3] : hr / 3.0;
+		double push = h[4], lift = h[5], swirl = h[6], displace = h[7];
+		double bx = h[8], bz = h[9];   // heading: signs wake and bow wave
+		double r02 = r0 * r0;
 		for (int i = 0; i < n; i++) {
 			double dx = sim.x[i] - cx, dz = sim.z[i] - cz;
-			double d = sqrt(dx * dx + dz * dz);
+			double d2 = dx * dx + dz * dz;
+			double d = sqrt(d2);
 			if (d >= hr)
 				continue;
-			double w = 1.0 - d / hr;
+			double taper = 1.0 - d / hr;
+			double near = r02 / (d2 + r02);
 			double dd = d < 1e-6 ? 1e-6 : d;
 			double nx = dx / dd, nz = dz / dd;
-			sim.vx[i] += push * w * nx;
-			sim.vz[i] += push * w * nz;
-			sim.vy[i] += 0.15 * push * w;
-			sim.om[i] += swirl * w * (bx * nz - bz * nx);
+			double hn = bx * nx + bz * nz;
+			double s2 = d2 / r02;
+			double prof = (s2 - 1.0) * exp(-s2);
+			double flow = push * near * taper;
+			sim.vx[i] += flow * (2.0 * hn * nx - bx) * dt;
+			sim.vz[i] += flow * (2.0 * hn * nz - bz) * dt;
+			sim.vy[i] += (displace * prof + lift * near * taper * hn) * dt;
+			sim.om[i] += swirl * near * taper * (bx * nz - bz * nx) * dt;
 		}
 	}
 	if (sim.ambient) {
@@ -806,6 +816,17 @@ void vsea_sim_step(double dt, const double *blasts, int64_t nb,
 // Per-vertex normals come from central differences over lattice neighbours;
 // colour is a swell/foam mix times sun diffuse plus specular.
 
+// Foam: water has to be thrown clear of the swell, or genuinely churned,
+// before it goes white. Ambient chop sits orders below the swirl threshold;
+// a wake or a shell burst saturates it.
+#define SEA_FOAM_FREEBOARD 0.30     // height above which water counts as spray
+#define SEA_FOAM_SPRAY 1.60         // foam per unit of that
+#define SEA_FOAM_SWIRL 0.18         // foam per unit of vorticity
+// troughs shade toward the deep colour and crests toward the swell colour
+// over this half-range, so the shape of the sea reads as colour and not only
+// as the faint diffuse gradient of a low-slope surface
+#define SEA_TROUGH 0.35
+
 typedef struct {
 	int cols, n;
 	double spacing, extent;
@@ -883,9 +904,10 @@ void vsea_mesh_init(void)
 	sea.ready = 1;
 }
 
-// vsea_mesh_update(sun[3], half[3], swell[4], foam[4]): refill the sheet
-// from the live particle state and upload it.
+// vsea_mesh_update(sun[3], half[3], deep[4], swell[4], foam[4]): refill the
+// sheet from the live particle state and upload it.
 void vsea_mesh_update(const double *sun, const double *half,
+                      const unsigned char *deepc,
                       const unsigned char *swellc, const unsigned char *foamc)
 {
 	if (!sea.ready || !sim.ready || sea.n != sim.n)
@@ -929,19 +951,28 @@ void vsea_mesh_update(const double *sun, const double *half,
 			if (spec < 0.0)
 				spec = 0.0;
 			spec = pow(spec, 24.0);
-			// foam is thrown water and torn-up vorticity; ambient chop is
-			// far below the threshold, a shell burst saturates it
-			double f = 0.8 * (sim.y[p] > 0.0 ? sim.y[p] : 0.0)
-			         + 0.3 * fabs(sim.om[p]);
+			// Scaling foam off raw height instead whitens every ordinary
+			// swell crest, which leaves nothing for a real wake to stand
+			// out against.
+			double lifted = sim.y[p] - SEA_FOAM_FREEBOARD;
+			double f = (lifted > 0.0 ? SEA_FOAM_SPRAY * lifted : 0.0)
+			         + SEA_FOAM_SWIRL * fabs(sim.om[p]);
 			if (f > 1.0)
 				f = 1.0;
+			// where this water stands, deep trough to breaking crest
+			double lvl = (sim.y[p] + SEA_TROUGH) / (2.0 * SEA_TROUGH);
+			if (lvl < 0.0)
+				lvl = 0.0;
+			else if (lvl > 1.0)
+				lvl = 1.0;
 			double lit = 1.9 * diff + 0.7 * spec;
 			unsigned char *c = sea.cols_ + p * 4;
 			// rgb only: scaling alpha by the light makes shaded water
 			// translucent and the sky shows through the troughs
 			for (int k = 0; k < 3; k++) {
-				double base = swellc[k] / 255.0
-				    + (foamc[k] / 255.0 - swellc[k] / 255.0) * f;
+				double water = deepc[k] / 255.0
+				    + (swellc[k] / 255.0 - deepc[k] / 255.0) * lvl;
+				double base = water + (foamc[k] / 255.0 - water) * f;
 				int v8 = (int)(base * lit * 255.0);
 				if (v8 < 0)
 					v8 = 0;

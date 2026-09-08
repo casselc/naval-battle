@@ -291,7 +291,8 @@
    (let [{:keys [volume centroid]} (submerged-metrics body water)]
      (when (and (pos? volume) centroid)
        {:force [0.0 (* WATER-DENSITY GRAVITY volume) 0.0]
-        :point centroid}))))
+        :point centroid
+        :volume volume}))))
 
 ;; --- skin, breach openings, flooding --------------------------------------------------
 

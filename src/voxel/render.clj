@@ -20,7 +20,8 @@
    :super (rl/rgba 152 158 168 255)    ; superstructure
    :gun (rl/rgba 58 60 68 255)})       ; turret dark
 
-(def SWELL (rl/rgba 30 96 138 255))
+(def DEEP (rl/rgba 18 62 104 255))    ; the colour of a trough
+(def SWELL (rl/rgba 46 124 170 255))  ; the colour of a crest
 (def FOAM (rl/rgba 208 232 240 255))
 
 ;; a late-afternoon sun from the west-northwest; HALF-VIEW is the halfway
@@ -113,7 +114,7 @@
             (not= (seac/mesh-vertex-count) (seac/sim-count)))
     (seac/mesh-init!)
     (vreset! sea-mesh-ready? true))
-  (seac/mesh-update! SUN-L HALF-VIEW SWELL FOAM)
+  (seac/mesh-update! SUN-L HALF-VIEW DEEP SWELL FOAM)
   (seac/mesh-draw!))
 
 (def ^:private SHADOW-ALPHA 96)

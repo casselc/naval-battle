@@ -121,7 +121,7 @@
   (testing "shaded water stays opaque - the sky must not show through troughs"
     (with-sheet 8 6.0
       (fn []
-        (seac/mesh-update! SUN [0.0 1.0 0.0] render/SWELL render/FOAM)
+        (seac/mesh-update! SUN [0.0 1.0 0.0] render/DEEP render/SWELL render/FOAM)
         (let [[_ _ colors] (seac/mesh-buffers)]
           (is (pos? (count colors)))
           (is (every? #(= 255 (% 3)) colors)
@@ -134,7 +134,7 @@
             surface is exactly the simulated particles"
     (with-sheet 12 10.0
       (fn []
-        (seac/mesh-update! SUN [0.0 1.0 0.0] render/SWELL render/FOAM)
+        (seac/mesh-update! SUN [0.0 1.0 0.0] render/DEEP render/SWELL render/FOAM)
         (let [[verts _ _] (seac/mesh-buffers)
               ps (seac/sim-particles)]
           (is (= (count ps) (count verts)))
@@ -152,13 +152,13 @@
   (testing "a still sea is flat; the height a player sees comes from the sim"
     (with-sheet 10 8.0
       (fn []
-        (seac/mesh-update! SUN [0.0 1.0 0.0] render/SWELL render/FOAM)
+        (seac/mesh-update! SUN [0.0 1.0 0.0] render/DEEP render/SWELL render/FOAM)
         (let [[flat _ _] (seac/mesh-buffers)]
           (is (every? #(< (Math/abs (- (second %) 0.05)) 1e-9) flat)
               "nothing analytic is added to a sea at rest")
           ;; a blast throws water up; the sheet must rise with it
           (seac/sim-step! 0.016 [{:x 0.0 :z 0.0 :r 6.0 :power 9.0}] nil)
-          (seac/mesh-update! SUN [0.0 1.0 0.0] render/SWELL render/FOAM)
+          (seac/mesh-update! SUN [0.0 1.0 0.0] render/DEEP render/SWELL render/FOAM)
           (let [[bumped _ _] (seac/mesh-buffers)]
             (is (> (apply max (map second bumped))
                    (+ 0.05 (apply max (map second flat))))
@@ -176,3 +176,54 @@
       (is (< (Math/abs (- ez 13.5)) 0.51) (str "half-length ~13, got " ez))))
   (testing "a cell at the anchor has a half-cell footprint"
     (is (= [1.0 1.0] (render/ship-extent [[[3 0 13] [0 1 0]]] [3.0 0.0 13.0])))))
+
+
+;; --- what the water looks like ----------------------------------------------
+
+(defn- sheet-colors
+  "Vertex colours of the sheet after seeding the sim with `setup`."
+  [cols extent setup]
+  (seac/sim-init! cols extent (+ extent 4.0) false 0.0 2048)
+  (seac/mesh-init!)
+  (setup)
+  (seac/mesh-update! SUN [0.0 1.0 0.0] render/DEEP render/SWELL render/FOAM)
+  (let [[_ _ colors] (seac/mesh-buffers)]
+    (seac/mesh-free!)
+    (seac/sim-free!)
+    colors))
+
+(defn- brightness [c] (+ (c 0) (c 1) (c 2)))
+
+(deftest ordinary-swell-does-not-foam
+  (testing "only water thrown clear of the swell, or genuinely churned, goes
+            white - scaling foam off raw height whitens every crest and
+            leaves nothing for a wake to stand out against"
+    (let [swell (sheet-colors 12 10.0
+                              (fn []
+                                ;; a gentle sea: crests well inside freeboard
+                                (seac/sim-load!
+                                 (mapv (fn [p] (assoc p :y 0.25 :omega 0.004))
+                                       (seac/sim-particles))
+                                 0.0)))
+          wake (sheet-colors 12 10.0
+                             (fn []
+                               (seac/sim-load!
+                                (mapv (fn [p] (assoc p :y 0.25 :omega 4.0))
+                                      (seac/sim-particles))
+                                0.0)))]
+      (is (< (apply max (map brightness swell))
+             (apply min (map brightness wake)))
+          "churned water is brighter than any part of an unbroken swell"))))
+
+(deftest the-sea-is-coloured-by-where-the-water-stands
+  (testing "troughs shade toward the deep colour, crests toward the swell one"
+    (let [at (fn [y] (sheet-colors 12 10.0
+                                   (fn []
+                                     (seac/sim-load!
+                                      (mapv #(assoc % :y y :omega 0.0)
+                                            (seac/sim-particles))
+                                      0.0))))
+          trough (apply max (map brightness (at -0.35)))
+          crest (apply min (map brightness (at 0.25)))]
+      (is (< trough crest)
+          "a trough is darker than a crest, so the shape of the sea reads"))))

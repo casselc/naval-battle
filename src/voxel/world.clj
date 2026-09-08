@@ -291,7 +291,8 @@
                       [id (if-let [f (and (:body s) (get by-body (:body s)))]
                             (let [moved (assoc s :pos (:pos f) :quat (:quat f)
                                                :vel (or (:vel f) [0.0 0.0 0.0])
-                                               :speed (or (:speed f) 0.0))]
+                                               :speed (or (:speed f) 0.0)
+                                               :displaced (or (:displaced f) 0.0))]
                               (if (and (not (:sunk moved))
                                        (< (second (:pos f)) (- SUNK-DEPTH)))
                                 (assoc moved :sunk true)
@@ -302,22 +303,39 @@
 (def ^:private WAKE-STATIONS
   "Where along the keel a hull is coupled to the water, as a fraction of its
   half-length. One disc at the anchor leaves most of a 26-unit hull touching
-  nothing; three make the wake the shape of the ship."
+  nothing; three make the coupling the shape of the ship."
   [-0.7 0.0 0.7])
-(def ^:private WAKE-RADIUS 6.0)
-;; the couplings share one hull's worth of momentum between them - three
-;; stations at full strength would put three ships' wash into the water
+;; the stations share one hull between them, so three of them displace one
+;; ship's worth of water rather than three
 (def ^:private WAKE-SHARE (/ 1.0 (double (count WAKE-STATIONS))))
+;; equivalent-area radius of the footprint one station stands for, and how
+;; far out its influence reaches (the displacement profile is negligible
+;; past three of these)
+(def ^:private STATION-RADIUS
+  (Math/sqrt (/ (* ship/BEAM ship/LENGTH WAKE-SHARE) Math/PI)))
+(def ^:private STATION-REACH (* 3.0 STATION-RADIUS))
+
+;; gains, all rates: the water is forced for dt seconds, never kicked once
+;; per frame, so none of this changes when the frame rate does
+(def ^:private DISPLACE-GAIN 0.35) ; surface fall per unit of mean draft
+(def ^:private BOW-WAVE-GAIN 0.40) ; bow wave / stern trough per unit speed
+(def ^:private FLOW-GAIN 0.10)     ; water shoved aside per unit speed
+(def ^:private SWIRL-GAIN 0.40)    ; vorticity shed per unit speed
 
 (defn- hulls-of
-  "The couplings each floating hull feeds the ocean: displacement push and
-  wake vorticity scaled by speed (a becalmed ship leaves still water), shed
-  at stations along the keel. hx/hz is her heading, which signs which side of
-  the track the swirl comes off."
+  "What each floating hull does to the water, at stations along its keel.
+
+  She displaces water simply by being there - `displace` is her mean draft,
+  the divergence-theorem displaced volume over her footprint, so a hull
+  taking on water sits deeper and a shot-up one sits higher - and displaces
+  more of it by moving through it: a bow wave, a stern trough, water shoved
+  out of her path and closing in astern, and vorticity shed off both sides of
+  her track. hx/hz is her heading, which signs all three of those."
   [st]
   (for [[_ s] (:ships st)
         :when (not (:sunk s))
         :let [v (or (:speed s) 0.0)
+              draft (/ (or (:displaced s) 0.0) (* ship/BEAM ship/LENGTH))
               [bx _ bz] (bow-dir s)
               [vx _ vz] (or (:vel s) [0.0 0.0 0.0])
               sp (Math/sqrt (+ (* vx vx) (* vz vz)))
@@ -328,8 +346,12 @@
         f WAKE-STATIONS]
     {:x (+ ((:pos s) 0) (* bx f half))
      :z (+ ((:pos s) 2) (* bz f half))
-     :r WAKE-RADIUS
-     :push (* 0.6 v WAKE-SHARE) :swirl (* 0.3 v WAKE-SHARE)
+     :r STATION-REACH
+     :hull-r STATION-RADIUS
+     :displace (* DISPLACE-GAIN draft)
+     :push (* FLOW-GAIN v)
+     :lift (* BOW-WAVE-GAIN v)
+     :swirl (* SWIRL-GAIN v)
      :hx hx :hz hz}))
 
 (defn- decide

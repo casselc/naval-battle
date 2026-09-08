@@ -228,15 +228,19 @@
   and pitches her, and a sea running over a breach floods her faster."
   [id rec dt water]
   (let [body (pose-record id rec)
-        plane (water-plane body water)]
-    (doseq [{:keys [force point]} (keep #(% body plane) [buoy/buoyancy-force
-                                                         buoy/flood-force])]
+        plane (water-plane body water)
+        lift (buoy/buoyancy-force body plane)]
+    (doseq [{:keys [force point]} (keep identity
+                                        [lift (buoy/flood-force body plane)])]
       (b3/apply-force! id
                        (force 0) (force 1) (force 2)
                        (point 0) (point 1) (point 2)
                        true))
-    (vswap! bodies* assoc-in [id :flood]
-            (:flood (buoy/step-flooding body dt plane)))))
+    (vswap! bodies* update id assoc
+            :flood (:flood (buoy/step-flooding body dt plane))
+            ;; the water this hull is standing in, which the ocean needs to
+            ;; know to displace it. Already solved for the uplift above.
+            :displaced (or (:volume lift) 0.0))))
 
 (defn- body-fact
   [id]
@@ -247,6 +251,7 @@
      :quat quat
      :vel [vx vy vz]
      :speed (Math/sqrt (+ (* vx vx) (* vy vy) (* vz vz)))
+     :displaced (get-in @bodies* [id :displaced] 0.0)
      :asleep (not (b3/awake? id))}))
 
 (defn step!

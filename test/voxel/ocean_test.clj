@@ -176,15 +176,18 @@
       (is (some (fn [p] (pos? (:y p))) (:particles oc')) "spray thrown up")
       (is (some (fn [p] (not= 0.0 (:omega p))) (:particles oc'))
           "not every particle keeps its initial vorticity under a swirl kick")))
-  (testing "a hull displacement pushes water outward"
-    (let [oc (random-cloud 16 11)
-          oc' (sea/step-ocean oc 0.016 nil
-                              [{:x 0.0 :z 0.0 :r 0.5 :push 4.0 :swirl 0.3
-                                :hx 0.0 :hz 1.0}])]
-      (is (some (fn [p] (> (+ (* (:x p) (:x p)) (* (:z p) (:z p)))
-                           1.0))
-                (:particles oc'))
-          "nearby particles pushed off the origin"))))
+  (testing "a hull under way moves the water it passes through"
+    ;; the old form of this asked whether SOME particle was more than a unit
+    ;; from the origin, which was already true of most of the cloud at spawn
+    (let [ps [{:x 3.0 :z 1.5 :omega 0.0}]
+          oc (assoc (sea/make-ocean ps) :ambient false)
+          hull {:x 0.0 :z 0.0 :r 12.0 :hull-r 4.0 :push 4.0 :lift 1.0
+                :swirl 0.3 :displace 0.5 :hx 0.0 :hz 1.0}
+          out (first (:particles (sea/step-ocean oc 0.05 nil [hull])))]
+      (is (not= 0.0 (:vx out)) "shoved out of the hull's way")
+      (is (not= 0.0 (:vz out)) "and swept along her side")
+      (is (not= 0.0 (:vy out)) "the surface moves under her")
+      (is (not= 0.0 (:omega out)) "and she sheds vorticity into it"))))
 
 (deftest ocean-stays-bounded
   (testing "particles reflect at the domain walls"
@@ -331,8 +334,8 @@
                      :omega (u -1.5 1.5)}))
           [pure0] (native-sheet cols extent bounds ps true sea/SPARSE-MAX)
           blasts [{:x 2.0 :z -3.0 :r 4.0 :power 6.0}]
-          hulls [{:x -5.0 :z 1.0 :r 5.0 :push 0.8 :swirl 0.4
-                  :hx 0.6 :hz 0.8}]]
+          hulls [{:x -5.0 :z 1.0 :r 9.0 :hull-r 3.0 :push 0.8 :lift 0.5
+                  :swirl 0.4 :displace 0.7 :hx 0.6 :hz 0.8}]]
       (loop [k 0 pure pure0]
         (when (< k 6)
           ;; couplings on the first step only, then free evolution
@@ -445,3 +448,110 @@
           out (sea/step-ocean oc 0.016 nil
                               [{:x 0.0 :z 0.0 :r 6.0 :push 0.0 :swirl 1.0}])]
       (is (zero? (:omega (first (:particles out))))))))
+
+
+;; --- ships displacing water -------------------------------------------------
+
+(defn- lattice-sea
+  "A still becalmed sheet, so anything that moves was moved by the hull."
+  [cols extent]
+  (assoc (sea/make-ocean (sea/lattice cols extent) (+ extent 4.0))
+         :ambient false :viscosity 0.0 :cols cols :extent extent))
+
+(defn- station
+  "One hull coupling at the origin, with everything off by default."
+  [& kvs]
+  (merge {:x 0.0 :z 0.0 :r 12.0 :hull-r 4.0
+          :push 0.0 :lift 0.0 :swirl 0.0 :displace 0.0
+          :hx 0.0 :hz 1.0}
+         (apply hash-map kvs)))
+
+(deftest a-hull-displaces-water-just-by-sitting-in-it
+  (testing "the surface falls under her footprint and rises in a ring around"
+    (let [oc (lattice-sea 41 40.0)
+          hull (station :displace 1.0 :hx 0.0 :hz 0.0)   ; dead in the water
+          out (sea/step-ocean oc 0.1 nil [hull])
+          vy (fn [p] (:vy p))
+          under (filter #(< (Math/sqrt (+ (* (:x %) (:x %)) (* (:z %) (:z %))))
+                            3.0)
+                        (:particles out))
+          ring (filter #(let [d (Math/sqrt (+ (* (:x %) (:x %))
+                                              (* (:z %) (:z %))))]
+                          (and (> d 5.0) (< d 10.0)))
+                       (:particles out))]
+      (is (pos? (count under)))
+      (is (pos? (count ring)))
+      (is (every? #(neg? (vy %)) under) "water under the hull is pushed down")
+      (is (every? #(pos? (vy %)) ring) "and out into the ring around her")))
+
+  (testing "displaced, not deleted: the profile moves no net water"
+    (let [oc (lattice-sea 61 60.0)
+          out (sea/step-ocean oc 0.1 nil [(station :displace 1.0)])
+          net (reduce + (map :vy (:particles out)))
+          moved (reduce + (map #(Math/abs (:vy %)) (:particles out)))]
+      (is (pos? moved) "water did move")
+      (is (< (Math/abs net) (* 0.02 moved))
+          (str "net volume change " net " against " moved " moved"))))
+
+  (testing "a deeper hull displaces more water"
+    (let [oc (lattice-sea 41 40.0)
+          dip (fn [d]
+                (- (reduce + (map #(min 0.0 (:vy %))
+                                  (:particles (sea/step-ocean
+                                               oc 0.1 nil
+                                               [(station :displace d)]))))))]
+      (is (> (dip 2.0) (* 1.9 (dip 1.0)))
+          "twice the draft, about twice the water pushed aside"))))
+
+(deftest a-hull-under-way-throws-a-bow-wave
+  (testing "water piles up ahead of her and is drawn down astern"
+    (let [oc (lattice-sea 41 40.0)
+          out (sea/step-ocean oc 0.1 nil [(station :lift 1.0 :hx 0.0 :hz 1.0)])
+          at (fn [x z] (first (filter #(and (< (Math/abs (- (:x %) x)) 0.01)
+                                            (< (Math/abs (- (:z %) z)) 0.01))
+                                      (:particles out))))
+          ahead (at 0.0 4.0)
+          astern (at 0.0 -4.0)
+          abeam (at 4.0 0.0)]
+      (is (pos? (:vy ahead)) "bow wave")
+      (is (neg? (:vy astern)) "stern trough")
+      (is (< (Math/abs (:vy abeam)) 1e-12) "nothing across the beam")
+      (is (< (Math/abs (+ (:vy ahead) (:vy astern))) 1e-12)
+          "antisymmetric, so it moves no net water"))))
+
+(deftest a-moving-hull-shoves-water-out-of-its-path
+  (testing "the flow around her is the doublet of a body under way"
+    (let [oc (lattice-sea 41 40.0)
+          out (sea/step-ocean oc 0.1 nil [(station :push 1.0 :hx 0.0 :hz 1.0)])
+          at (fn [x z] (first (filter #(and (< (Math/abs (- (:x %) x)) 0.01)
+                                            (< (Math/abs (- (:z %) z)) 0.01))
+                                      (:particles out))))]
+      ;; steaming toward +z
+      (is (pos? (:vz (at 0.0 4.0))) "water ahead is pushed along in front")
+      (is (pos? (:vz (at 0.0 -4.0))) "and closes in behind the stern")
+      (is (neg? (:vz (at 4.0 0.0))) "water on the beam is swept aft")
+      (is (< (Math/abs (:vx (at 0.0 4.0))) 1e-12)
+          "the flow is symmetric about her track"))))
+
+(deftest hull-couplings-are-rates-not-per-frame-kicks
+  (testing "covering the same second of sailing in more, smaller steps puts
+            the same amount of water in motion"
+    ;; a coupling applied once per frame regardless of dt makes the ocean
+    ;; react N times harder at N times the frame rate, which is what this had
+    ;; before: the ratio below would be the step-count ratio, not ~1
+    (let [oc (lattice-sea 21 20.0)
+          hull (station :displace 1.0 :lift 0.6 :push 0.5 :swirl 0.4)
+          run (fn [dt steps]
+                (let [end (reduce (fn [o _] (sea/step-ocean o dt nil [hull]))
+                                  oc (range steps))]
+                  [(reduce + (map #(Math/abs (:vy %)) (:particles end)))
+                   (reduce + (map #(Math/abs (:omega %)) (:particles end)))]))
+          [vy-coarse om-coarse] (run 0.04 5)
+          [vy-fine om-fine] (run 0.01 20)]
+      (is (pos? vy-coarse))
+      (is (pos? om-coarse))
+      (is (< 0.85 (/ vy-fine vy-coarse) 1.15)
+          (str "vertical forcing ratio " (/ vy-fine vy-coarse)
+               " - four times the steps must not mean four times the sea"))
+      (is (< 0.85 (/ om-fine om-coarse) 1.15)
+          (str "vorticity ratio " (/ om-fine om-coarse))))))

@@ -22,7 +22,7 @@
 
 (ffi/defcfn mesh-init* "vsea_mesh_init" [] :void)
 (ffi/defcfn mesh-update* "vsea_mesh_update"
-  [:pointer :pointer :pointer :pointer] :void)
+  [:pointer :pointer :pointer :pointer :pointer] :void)
 (ffi/defcfn mesh-draw* "vsea_mesh_draw" [] :void)
 (ffi/defcfn mesh-free* "vsea_mesh_free" [] :void)
 (ffi/defcfn mesh-vertex-count* "vsea_mesh_vertex_count" [] :int64)
@@ -55,6 +55,7 @@
   (when (nil? @mesh-bufs)
     (reset! mesh-bufs {:sun (ffi/alloc 24)
                        :half (ffi/alloc 24)
+                       :deep (ffi/alloc 4)
                        :swell (ffi/alloc 4)
                        :foam (ffi/alloc 4)})))
 
@@ -67,16 +68,18 @@
 
 (defn mesh-update!
   "Refill and upload the sheet from the live particle state. sun/half are the
-  lighting directions (3-vectors), swell/foam the packed base colours."
-  [sun half swell foam]
+  lighting directions (3-vectors); deep/swell/foam the packed base colours
+  for a trough, a crest and broken water."
+  [sun half deep swell foam]
   (ensure-mesh-buffers!)
   (let [b @mesh-bufs]
     (dotimes [k 3]
       (ffi/write (:sun b) :double (double (nth sun k)) (* 8 k))
       (ffi/write (:half b) :double (double (nth half k)) (* 8 k)))
+    (write-color! (:deep b) deep)
     (write-color! (:swell b) swell)
     (write-color! (:foam b) foam)
-    (mesh-update* (:sun b) (:half b) (:swell b) (:foam b))))
+    (mesh-update* (:sun b) (:half b) (:deep b) (:swell b) (:foam b))))
 
 (defn mesh-draw!
   "One draw call for the whole sheet, identity transform."
@@ -191,7 +194,7 @@
       (reset! sim-bufs
               (into {:cap cap
                      :blasts (ffi/alloc (* 8 4 64))
-                     :hulls (ffi/alloc (* 8 7 64))}
+                     :hulls (ffi/alloc (* 8 10 64))}
                     (map (fn [k] [k (ffi/alloc (* 8 cap))]))
                     [:x :z :y :vx :vy :vz :om])))))
 
@@ -235,11 +238,14 @@
 
 (defn sim-step!
   "Advance the native ocean dt seconds under this frame's couplings.
-  blasts are {:x :z :r :power}, hulls {:x :z :r :push :swirl :hx :hz}."
+  blasts are {:x :z :r :power}, hulls
+  {:x :z :r :hull-r :push :lift :swirl :displace :hx :hz}."
   [dt blasts hulls]
   (let [b @sim-bufs
         nb (write-pack! (:blasts b) blasts [:x :z :r :power])
-        nh (write-pack! (:hulls b) hulls [:x :z :r :push :swirl :hx :hz])]
+        nh (write-pack! (:hulls b) hulls
+                        [:x :z :r :hull-r :push :lift :swirl :displace
+                         :hx :hz])]
     (sim-step* (double dt) (:blasts b) (long nb) (:hulls b) (long nh))))
 
 (defn sim-particles

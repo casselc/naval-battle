@@ -561,39 +561,69 @@
           ps)))
 
 (defn- apply-hulls
-  "Moving hulls [{:x :z :r :push :swirl :hx :hz}]: displace nearby water
-  outward and shed vorticity at the hull sides (the wake).
+  "Hulls in the water, as [{:x :z :r :hull-r :push :lift :swirl :displace
+  :hx :hz}]. Every term is a rate, applied over dt, so the coupling does not
+  get stronger just because the frame rate went up.
 
-  The shed vorticity is signed by which side of the hull's TRACK the water
-  sits on - the y component of heading x offset - so port and starboard shed
-  opposite swirl and the wake follows the ship round. Signing it by
-  (nz - nx) instead, as this did, sheds on a fixed world diagonal whatever
-  course she steers."
-  [ps hulls]
+  Four things happen where a hull sits:
+
+  - Static displacement. The hull occupies this water whether or not it is
+    moving, so the surface sits down over its footprint and rises in a ring
+    around it. The profile (s^2 - 1) e^(-s^2), s = d / hull-r, integrates to
+    exactly zero over the plane, so the water pushed down comes back up
+    somewhere - it is displaced, not deleted. `displace` is the hull's mean
+    draft, which is its divergence-theorem displaced volume over its
+    footprint, so a flooding wreck sits deeper and a shot-up one sits higher.
+
+  - Displacement flow. Water has to get out of a moving hull's way and close
+    in behind it: the 2D doublet 2(h.n)n - h of a body moving along h, which
+    pushes water forward off the bow, aft along the beam, and forward again
+    into the space behind the stern.
+
+  - The bow and stern wave: water piled up ahead of her and drawn down
+    astern, signed by h.n, so it is antisymmetric and moves no net volume.
+
+  - Shed vorticity, signed by which side of her TRACK the water is on - the
+    y component of heading x offset - so port and starboard shed opposite
+    swirl and the wake follows her round. (Signing it by (nz - nx) instead,
+    as this did, sheds on a fixed world diagonal whatever course she steers.)"
+  [ps hulls dt]
   (if (empty? hulls)
     ps
     (mapv (fn [p]
-            (reduce (fn [p {:keys [x z r push swirl hx hz]}]
+            (reduce (fn [p {:keys [x z r push lift swirl displace hx hz]
+                            :as hull}]
                       (let [dx (- (:x p) x)
                             dz (- (:z p) z)
-                            d (Math/sqrt (+ (* dx dx) (* dz dz)))]
+                            d2 (+ (* dx dx) (* dz dz))
+                            d (Math/sqrt d2)]
                         (if (>= d r)
                           p
-                          (let [w (- 1.0 (/ d r))
-                                d (max d 1e-6)
-                                nx (/ dx d)
-                                nz (/ dz d)
-                                ;; no heading means no way on, and a hull
-                                ;; sitting still sheds no wake
+                          (let [r0 (let [h (or (:hull-r hull) 0.0)]
+                                     (if (pos? h) h (/ r 3.0)))
+                                taper (- 1.0 (/ d r))
+                                near (/ (* r0 r0) (+ d2 (* r0 r0)))
+                                dd (max d 1e-6)
+                                nx (/ dx dd)
+                                nz (/ dz dd)
+                                ;; no heading means no way on: she still
+                                ;; displaces water, but leaves no wake
                                 hx (or hx 0.0)
-                                hz (or hz 0.0)]
+                                hz (or hz 0.0)
+                                hn (+ (* hx nx) (* hz nz))
+                                s2 (/ d2 (* r0 r0))
+                                prof (* (- s2 1.0) (Math/exp (- s2)))
+                                flow (* (or push 0.0) near taper)]
                             (-> p
-                                (update :vx + (* push w nx))
-                                (update :vz + (* push w nz))
-                                (update :vy + (* 0.15 push w))
-                                (update :omega + (* swirl w
-                                                    (- (* hx nz)
-                                                       (* hz nx)))))))))
+                                (update :vx + (* flow (- (* 2.0 hn nx) hx) dt))
+                                (update :vz + (* flow (- (* 2.0 hn nz) hz) dt))
+                                (update :vy + (* (+ (* (or displace 0.0) prof)
+                                                    (* (or lift 0.0) near
+                                                       taper hn))
+                                                 dt))
+                                (update :omega + (* (or swirl 0.0) near taper
+                                                    (- (* hx nz) (* hz nx))
+                                                    dt)))))))
                     p hulls))
           ps)))
 
@@ -693,7 +723,7 @@
   [oc dt blasts hulls]
    (let [ps (-> (:particles oc)
                  (apply-blasts blasts)
-                 (apply-hulls hulls)
+                 (apply-hulls hulls dt)
                  ((fn [ps] (if (:ambient oc)
                              (apply-ambient ps (or (:time oc) 0.0) dt)
                              ps))))
