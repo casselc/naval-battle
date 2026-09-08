@@ -3,7 +3,7 @@ set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 compiler=${JOLT_ASPECT_JOLT:-/home/chuck/ai-src/worktrees/jolt-aspects-v083-sync/target/release/jolt}
-wrapper=/home/chuck/ai-src/tools/jolt-with-chez-10.4.1
+wrapper=${JOLT_CHEZ_WRAPPER:-/home/chuck/ai-src/tools/jolt-with-chez-10.4.1}
 out="$root/target/instrumentation"
 
 mkdir -p "$out"

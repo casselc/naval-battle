@@ -21,6 +21,9 @@ Set `JOLT_ASPECT_JOLT` to the aspect-capable Jolt executable. Until that
 compiler is published through the ordinary project toolchain, the default is
 the reviewed local workspace build. Set `OSCOPE_ROOT` or `JOLT_CHDB_LIB` to
 override the local oscope checkout or qualified chDB Durable library.
+`JOLT_CHEZ_WRAPPER` is reserved for CI, where the checked-out compiler has
+already provisioned and verified Chez 10.4.1; local runs should retain the
+workspace wrapper default.
 
 The direct `casselc/jolt-net` dependency is intentional. The OTel dependency
 currently reaches an older pre-Jolt-0.8 network implementation transitively;

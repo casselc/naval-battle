@@ -3,7 +3,7 @@ set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 oscope=${OSCOPE_ROOT:-/home/chuck/ai-src/oscope}
-wrapper=/home/chuck/ai-src/tools/jolt-with-chez-10.4.1
+wrapper=${JOLT_CHEZ_WRAPPER:-/home/chuck/ai-src/tools/jolt-with-chez-10.4.1}
 lib=${JOLT_CHDB_LIB:-/home/chuck/.cache/jolt-chdb/26.7.2-rc.2/linux-amd64/libchdb.so}
 out="$root/target/instrumentation"
 data=$(mktemp -d "$out/oscope-data.XXXXXX")

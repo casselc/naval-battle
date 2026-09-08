@@ -79,11 +79,13 @@ jobs:
       - name: Verify exact advice and external OTLP
         env:
           JOLT_ASPECT_JOLT: ${{ github.workspace }}/.qualification/jolt/bin/jolt
+          JOLT_CHEZ_WRAPPER: /usr/bin/env
         run: instrumentation/scripts/verify.sh
 
       - name: Verify separate-process oscope persistence
         env:
           JOLT_CHDB_LIB: ${{ runner.temp }}/chdb-durable/native/libchdb.so
           JOLT_ASPECT_JOLT: ${{ github.workspace }}/.qualification/jolt/bin/jolt
+          JOLT_CHEZ_WRAPPER: /usr/bin/env
           OSCOPE_ROOT: ${{ github.workspace }}/.qualification/oscope
         run: instrumentation/scripts/verify_oscope.sh
