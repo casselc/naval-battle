@@ -98,7 +98,7 @@ static double fbinom[2 * FMM_P][2 * FMM_P];
 static int fmm_ready = 0;
 
 static const double *fmm_xs, *fmm_zs, *fmm_om;
-static double fmm_bounds;
+static double fmm_bounds, fmm_cx, fmm_cz;
 
 static void fmm_tables(void)
 {
@@ -111,10 +111,10 @@ static void fmm_tables(void)
 	fmm_ready = 1;
 }
 
-static double fmm_clamp(double v)
+static double fmm_clamp(double v, double c)
 {
-	double b = fmm_bounds;
-	return v < -b ? -b : (v > b ? b : v);
+	double lo = c - fmm_bounds, hi = c + fmm_bounds;
+	return v < lo ? lo : (v > hi ? hi : v);
 }
 
 static int fmm_split(int parent, double cx, double cz, double h,
@@ -138,8 +138,8 @@ static int fmm_split(int parent, double cx, double cz, double h,
 	int cnt[4] = {0, 0, 0, 0}, pos[4], start[4];
 	for (int i = begin; i < end; i++) {
 		int j = forder[i];
-		double x = fmm_clamp(fmm_xs[j]);
-		double z = fmm_clamp(fmm_zs[j]);
+		double x = fmm_clamp(fmm_xs[j], fmm_cx);
+		double z = fmm_clamp(fmm_zs[j], fmm_cz);
 		int q = (z > cz) ? ((x > cx) ? 3 : 2) : ((x > cx) ? 1 : 0);
 		cnt[q]++;
 		tmp[i] = q;
@@ -299,8 +299,11 @@ static int fmm_far(const FmmNode *a, const FmmNode *b)
 	return dx > 1 || dz > 1;
 }
 
+// The tree spans [cx-bounds, cx+bounds] x [cz-bounds, cz+bounds]. The
+// ocean's window of particles scrolls with the camera, so the domain has to
+// travel with it rather than sitting on the world origin.
 void vsea_fmm(const double *xs, const double *zs, const double *om,
-              int64_t n, int64_t p64, double bounds,
+              int64_t n, int64_t p64, double bounds, double cx, double cz,
               double *vx, double *vz)
 {
 	int nn = (int)n;
@@ -308,7 +311,8 @@ void vsea_fmm(const double *xs, const double *zs, const double *om,
 	if (nn <= 0)
 		return;
 	fmm_tables();
-	fmm_xs = xs; fmm_zs = zs; fmm_om = om; fmm_bounds = bounds;
+	fmm_xs = xs; fmm_zs = zs; fmm_om = om;
+	fmm_bounds = bounds; fmm_cx = cx; fmm_cz = cz;
 	// plain direct sum if the caller exceeds the scratch capacity
 	if (nn > FMM_MAXN) {
 		for (int i = 0; i < nn; i++) {
@@ -334,7 +338,7 @@ void vsea_fmm(const double *xs, const double *zs, const double *om,
 		fgrid[i] = -1;
 	for (int i = 0; i < nn; i++)
 		forder[i] = i;
-	fmm_split(-1, 0.0, 0.0, bounds, 0, 0, 0, 0, nn);
+	fmm_split(-1, cx, cz, bounds, 0, 0, 0, 0, nn);
 	for (int d = 0; d <= FMM_DEPTH; d++)
 		flevel_n[d] = 0;
 	for (int id = 0; id < fnodes_n; id++) {
@@ -522,6 +526,14 @@ static const double sim_swell[SIM_SWELL_TRAINS][5] = {
 
 typedef struct {
 	int n, cols, ready, ambient, sparse_max;
+	// The window of water we bother to simulate. It is a fixed lattice of
+	// cols x cols particles that SCROLLS: (ox, oz) is where its centre sits
+	// in the world, and (ioff, joff) rotate the index mapping so sliding it
+	// by a tile costs one reseeded column instead of moving every particle.
+	// Water that leaves the far edge comes back as still water at the near
+	// one, which is what makes the ocean look endless.
+	double ox, oz;
+	int ioff, joff;
 	double spacing, extent, bounds, viscosity, t;
 	double *x, *z, *y, *vx, *vy, *vz, *om;
 	double *ux, *uz;            // this step's field velocity
@@ -575,6 +587,8 @@ void vsea_sim_init(int cols, double extent, double bounds,
 	sim.viscosity = viscosity;
 	sim.sparse_max = sparse_max;
 	sim.spacing = 2.0 * extent / (double)(cols - 1);
+	sim.ox = 0.0; sim.oz = 0.0;
+	sim.ioff = 0; sim.joff = 0;
 	sim.t = 0.0;
 	size_t b = (size_t)n * sizeof(double);
 	sim.x = malloc(b); sim.z = malloc(b); sim.y = malloc(b);
@@ -592,6 +606,82 @@ void vsea_sim_init(int cols, double extent, double bounds,
 			sim.ux[p] = 0.0; sim.uz[p] = 0.0;
 		}
 	sim.ready = 1;
+}
+
+// lattice cell (i, j) -> particle index, through the scroll offsets
+static int sim_wrap(int v, int n)
+{
+	v %= n;
+	return v < 0 ? v + n : v;
+}
+
+static int sim_idx(int i, int j)
+{
+	return sim_wrap(i + sim.ioff, sim.cols) * sim.cols
+	     + sim_wrap(j + sim.joff, sim.cols);
+}
+
+// still water at the lattice cell's rest position - what a particle becomes
+// when it is recycled from the trailing edge of the window to the leading one
+static void sim_seed_cell(int i, int j)
+{
+	int p = sim_idx(i, j);
+	sim.x[p] = sim.ox - sim.extent + i * sim.spacing;
+	sim.z[p] = sim.oz - sim.extent + j * sim.spacing;
+	sim.y[p] = 0.0;
+	sim.vx[p] = 0.0; sim.vy[p] = 0.0; sim.vz[p] = 0.0;
+	sim.om[p] = 0.0;
+	sim.ux[p] = 0.0; sim.uz[p] = 0.0;
+}
+
+// vsea_sim_recenter(cx, cz): slide the window so it is centred on (cx, cz),
+// snapped to whole tiles. Water already in the window keeps its state and
+// its place in the world; only the strip that has just come into view is
+// seeded fresh.
+void vsea_sim_recenter(double cx, double cz)
+{
+	if (!sim.ready)
+		return;
+	int cols = sim.cols;
+	int di = (int)llround((cx - sim.ox) / sim.spacing);
+	int dj = (int)llround((cz - sim.oz) / sim.spacing);
+	if (di == 0 && dj == 0)
+		return;
+	sim.ox += di * sim.spacing;
+	sim.oz += dj * sim.spacing;
+	if (di <= -cols || di >= cols || dj <= -cols || dj >= cols) {
+		// jumped clear of the old window: none of it is worth keeping
+		sim.ioff = 0;
+		sim.joff = 0;
+		for (int i = 0; i < cols; i++)
+			for (int j = 0; j < cols; j++)
+				sim_seed_cell(i, j);
+		return;
+	}
+	sim.ioff = sim_wrap(sim.ioff + di, cols);
+	sim.joff = sim_wrap(sim.joff + dj, cols);
+	if (di > 0)
+		for (int i = cols - di; i < cols; i++)
+			for (int j = 0; j < cols; j++)
+				sim_seed_cell(i, j);
+	else if (di < 0)
+		for (int i = 0; i < -di; i++)
+			for (int j = 0; j < cols; j++)
+				sim_seed_cell(i, j);
+	if (dj > 0)
+		for (int j = cols - dj; j < cols; j++)
+			for (int i = 0; i < cols; i++)
+				sim_seed_cell(i, j);
+	else if (dj < 0)
+		for (int j = 0; j < -dj; j++)
+			for (int i = 0; i < cols; i++)
+				sim_seed_cell(i, j);
+}
+
+void vsea_sim_origin(double *out)
+{
+	out[0] = sim.ready ? sim.ox : 0.0;
+	out[1] = sim.ready ? sim.oz : 0.0;
 }
 
 int64_t vsea_sim_count(void) { return sim.ready ? sim.n : 0; }
@@ -639,17 +729,17 @@ double vsea_sim_height(double x, double z)
 		return 0.0;
 	int cols = sim.cols;
 	double top = (double)(cols - 1) - 1e-9;
-	double fi = (x + sim.extent) / sim.spacing;
-	double fj = (z + sim.extent) / sim.spacing;
+	double fi = (x - (sim.ox - sim.extent)) / sim.spacing;
+	double fj = (z - (sim.oz - sim.extent)) / sim.spacing;
 	if (fi < 0.0) fi = 0.0; else if (fi > top) fi = top;
 	if (fj < 0.0) fj = 0.0; else if (fj > top) fj = top;
 	int i = (int)fi, j = (int)fj;
 	double u = fi - i, v = fj - j;
 	const double *y = sim.y;
-	return (1.0 - u) * (1.0 - v) * y[i * cols + j]
-	     + u * (1.0 - v) * y[(i + 1) * cols + j]
-	     + (1.0 - u) * v * y[i * cols + j + 1]
-	     + u * v * y[(i + 1) * cols + j + 1];
+	return (1.0 - u) * (1.0 - v) * y[sim_idx(i, j)]
+	     + u * (1.0 - v) * y[sim_idx(i + 1, j)]
+	     + (1.0 - u) * v * y[sim_idx(i, j + 1)]
+	     + u * v * y[sim_idx(i + 1, j + 1)];
 }
 
 double vsea_sim_circulation(void)
@@ -679,7 +769,7 @@ static void sim_velocities(void)
 		           sim.ux, sim.uz, sim.n);
 	} else {
 		vsea_fmm(sim.x, sim.z, sim.om, sim.n, FMM_P, sim.bounds,
-		         sim.ux, sim.uz);
+		         sim.ox, sim.oz, sim.ux, sim.uz);
 	}
 }
 
@@ -757,7 +847,9 @@ void vsea_sim_step(double dt, const double *blasts, int64_t nb,
 
 	double drag = pow(SIM_DRAG, dt);
 	double decay = 1.0 - sim.viscosity * dt;
-	double b = sim.bounds;
+	// the domain wall travels with the window, well outside the frame
+	double bx0 = sim.ox - sim.bounds, bx1 = sim.ox + sim.bounds;
+	double bz0 = sim.oz - sim.bounds, bz1 = sim.oz + sim.bounds;
 	for (int i = 0; i < n; i++) {
 		double fx = sim.ux[i], fz = sim.uz[i];
 		// water with nothing happening to it is left exactly alone, so a
@@ -768,10 +860,10 @@ void vsea_sim_step(double dt, const double *blasts, int64_t nb,
 			continue;
 		double vx = sim.vx[i] + fx, vz = sim.vz[i] + fz;
 		double x = sim.x[i] + vx * dt, z = sim.z[i] + vz * dt;
-		if (x > b) { x = b; vx = -vx; }
-		else if (x < -b) { x = -b; vx = -vx; }
-		if (z > b) { z = b; vz = -vz; }
-		else if (z < -b) { z = -b; vz = -vz; }
+		if (x > bx1) { x = bx1; vx = -vx; }
+		else if (x < bx0) { x = bx0; vx = -vx; }
+		if (z > bz1) { z = bz1; vz = -vz; }
+		else if (z < bz0) { z = bz0; vz = -vz; }
 		sim.x[i] = x;
 		sim.z[i] = z;
 		sim.vx[i] = (vx - fx) * drag;
@@ -921,27 +1013,28 @@ void vsea_mesh_update(const double *sun, const double *half,
 	double slack = 0.45 * step;
 	for (int i = 0; i < cols; i++)
 		for (int j = 0; j < cols; j++) {
-			int p = i * cols + j;
-			double rx = -sea.extent + i * step;
-			double rz = -sea.extent + j * step;
+			int p = sim_idx(i, j);
+			double rx = sim.ox - sea.extent + i * step;
+			double rz = sim.oz - sea.extent + j * step;
 			double dx = sim.x[p] - rx, dz = sim.z[p] - rz;
 			if (dx > slack) dx = slack; else if (dx < -slack) dx = -slack;
 			if (dz > slack) dz = slack; else if (dz < -slack) dz = -slack;
 
-			double hm = sim.y[i > 0 ? p - cols : p];
-			double hp = sim.y[i < cols - 1 ? p + cols : p];
-			double gm = sim.y[j > 0 ? p - 1 : p];
-			double gp = sim.y[j < cols - 1 ? p + 1 : p];
+			double hm = sim.y[i > 0 ? sim_idx(i - 1, j) : p];
+			double hp = sim.y[i < cols - 1 ? sim_idx(i + 1, j) : p];
+			double gm = sim.y[j > 0 ? sim_idx(i, j - 1) : p];
+			double gp = sim.y[j < cols - 1 ? sim_idx(i, j + 1) : p];
 			double gx = (hp - hm) / two_s;
 			double gz = (gp - gm) / two_s;
 			double l = sqrt(1.0 + gx * gx + gz * gz);
 			double nx = -gx / l, ny = 1.0 / l, nz = -gz / l;
 
-			float *vp = sea.verts + p * 3;
+			int vi = i * cols + j;
+			float *vp = sea.verts + vi * 3;
 			vp[0] = (float)(rx + dx);
 			vp[1] = (float)(sim.y[p] + 0.05);
 			vp[2] = (float)(rz + dz);
-			float *np = sea.norms + p * 3;
+			float *np = sea.norms + vi * 3;
 			np[0] = (float)nx; np[1] = (float)ny; np[2] = (float)nz;
 
 			double diff = nx * sun[0] + ny * sun[1] + nz * sun[2];
@@ -966,7 +1059,7 @@ void vsea_mesh_update(const double *sun, const double *half,
 			else if (lvl > 1.0)
 				lvl = 1.0;
 			double lit = 1.9 * diff + 0.7 * spec;
-			unsigned char *c = sea.cols_ + p * 4;
+			unsigned char *c = sea.cols_ + vi * 4;
 			// rgb only: scaling alpha by the light makes shaded water
 			// translucent and the sky shows through the troughs
 			for (int k = 0; k < 3; k++) {

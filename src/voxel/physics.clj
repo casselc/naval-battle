@@ -78,8 +78,8 @@
     (seac/fmm [{:x 0.0 :z 0.0 :omega 0.0} {:x 1.0 :z 0.0 :omega 1.0}]
               10 ocean/BOUNDS)
     (reset! ocean/fmm-kernel
-            (fn [oc] (seac/fmm (:particles oc)
-                               (or (:p oc) 10) (:bounds oc))))
+            (fn [oc] (seac/fmm (:particles oc) (or (:p oc) 10) (:bounds oc)
+                               (or (:cx oc) 0.0) (or (:cz oc) 0.0))))
     (catch Exception _ nil))
   ;; the native particle sim: the whole ocean state in flat C arrays, so no
   ;; particle crosses the FFI boundary in the frame loop
@@ -91,7 +91,9 @@
              :step! seac/sim-step!
              :particles seac/sim-particles
              :time seac/sim-time
-             :height seac/sim-height})
+             :height seac/sim-height
+             :recenter! seac/sim-recenter!
+             :origin seac/sim-origin})
     (catch Exception _ nil))
   (let [wrld (b3/create-world 0.0 (- w/GRAVITY) 0.0 1)]
     (vreset! world* wrld)

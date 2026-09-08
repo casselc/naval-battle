@@ -147,7 +147,7 @@
   the C library loads. A map of
   {:init! (fn [cols extent bounds ambient? viscosity sparse-max])
    :step! (fn [dt blasts hulls]) :particles (fn []) :time (fn [])
-   :height (fn [x z])}.
+   :height (fn [x z]) :recenter! (fn [x z]) :origin (fn [])}.
 
   When it is present the game's particle state lives in flat native arrays
   and never crosses the FFI boundary per particle; the pure model in this
@@ -211,6 +211,26 @@
              (* u (- 1.0 v) (h (inc i) j))
              (* (- 1.0 u) v (h i (inc j)))
              (* u v (h (inc i) (inc j)))))))))
+
+(defn recenter!
+  "Slide the simulated window of water so it covers what the camera is
+  looking at. The window is a fixed lattice that scrolls: water leaving the
+  trailing edge comes back as still water at the leading one, so the ocean
+  reads as endless without simulating an endless amount of it.
+
+  Only the native sim windows - the pure model is a fixed patch, and is the
+  reference for what a step DOES, not for how much sea is kept."
+  [oc x z]
+  (when (:native oc)
+    ((:recenter! @sim-kernel) x z))
+  oc)
+
+(defn origin
+  "Where the centre of the simulated window sits in the world, [x z]."
+  [oc]
+  (if (:native oc)
+    ((:origin @sim-kernel))
+    [0.0 0.0]))
 
 (defn surface-fn
   "A closure reading this ocean's surface height, so voxel.physics can float

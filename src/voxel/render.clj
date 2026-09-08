@@ -13,6 +13,9 @@
 (def CAMERA-TARGET cam/TARGET)
 (def FOVY cam/FOVY)
 (def CAMERA-ORTHO cam/ORTHO)
+;; the title screen and the tools get the fixed vantage; the frame loop
+;; hands draw-frame! the one that is following the battle
+(def DEFAULT-CAMERA {:pos cam/POS :target cam/TARGET :fovy cam/FOVY})
 
 (def MAT-COLORS
   {:hull (rl/rgba 72 94 112 255)       ; steel grey-blue
@@ -93,11 +96,11 @@
   "A warship as ONE C-submitted mesh: per-face colours were computed at
   build; per frame C rotates the faces by the hull quaternion, culls those
   hidden from the camera, sun-shades by the live world normal and draws."
-  [id ship]
+  [id ship cam-pos]
   (let [mid (ensure-ship-mesh! id ship)]
     (when (>= mid 0)
       (seac/ship-draw! mid (:pos ship) (:quat ship) (:anchor ship)
-                       SUN-L CAMERA-POS))))
+                       SUN-L cam-pos))))
 
 ;; defonce so an ns reload keeps the C mesh rather than leaking it
 (defonce sea-mesh-ready? (volatile! false))
@@ -220,19 +223,21 @@
               :size 20 :color rl/WHITE)))
 
 (defn draw-frame!
-  "Everything for one frame."
-  [{:keys [world ui debris width height screen]}]
+  "Everything for one frame. `camera` is the live vantage from voxel.camera;
+  without one it falls back to the fixed default."
+  [{:keys [world ui debris width height screen camera]}]
+  (let [{:keys [pos target fovy]} (or camera DEFAULT-CAMERA)]
   (rl/begin-drawing)
   (rl/clear-background (rl/rgba 120 160 200 255))
-  (rl/with-camera-3d {:pos-x (CAMERA-POS 0) :pos-y (CAMERA-POS 1) :pos-z (CAMERA-POS 2)
-                      :target-x (CAMERA-TARGET 0) :target-y (CAMERA-TARGET 1)
-                      :target-z (CAMERA-TARGET 2)
-                       :fovy FOVY :projection CAMERA-ORTHO}
+  (rl/with-camera-3d {:pos-x (pos 0) :pos-y (pos 1) :pos-z (pos 2)
+                      :target-x (target 0) :target-y (target 1)
+                      :target-z (target 2)
+                      :fovy fovy :projection CAMERA-ORTHO}
     (fn []
       (draw-sea!)
       (draw-shadows! (:ships world))
       (doseq [[id ship] (:ships world)]
-        (draw-ship! id ship))
+        (draw-ship! id ship pos))
       (draw-shells! (:shells world))
       (when (= :game screen)
         (draw-aim! (:aim ui))
@@ -251,4 +256,4 @@
       (draw-overlay! "DEFEAT"
                      "your fleet is lost - R or click to try again" width height)))
   (rl/fps! :x 8 :y 8)
-  (rl/end-drawing))
+  (rl/end-drawing)))

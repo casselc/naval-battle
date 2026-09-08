@@ -42,13 +42,15 @@
 (def BLAST-RADIUS 2.6)
 (def SUNK-DEPTH 6.0)
 (def SHELL-LIFETIME 20.0)
-;; a shell past this has left the battle; the fleets spawn at 62 and the
-;; simulated sea runs to 93, so it has to be wider than either
-(def ARENA-LIMIT 120.0)
+;; A shell this far from its own gun has left the battle. Measured from
+;; where it was fired, not from the world origin: the fight drifts wherever
+;; the ships take it, and a fixed box around the origin would start eating
+;; every round the moment they sailed out of it.
+(def SHELL-REACH (* 2.0 GUN-RANGE))
 ;; well over three times gun range apart: the fleets have a proper approach
 ;; to sail before anyone is in a position to shoot
-(def PLAYER-POS [0.0 -3.0 -62.0])
-(def ENEMY-POS [0.0 -3.0 62.0])
+(def PLAYER-POS [0.0 -3.0 -56.0])
+(def ENEMY-POS [0.0 -3.0 56.0])
 
 ;; --- fleet -----------------------------------------------------------------
 
@@ -151,7 +153,7 @@
         (if (nil? v)
           state
           (-> state
-              (update :shells conj {:owner id :pos m :vel v :t 0.0})
+              (update :shells conj {:owner id :pos m :vel v :t 0.0 :from m})
               (assoc-in [:ships id :cooldown] FIRE-COOLDOWN)
               (update :events conj {:type :fired :ship id})))))))
 
@@ -231,8 +233,7 @@
             struck [nil [{:kind :hit :ship struck :point p}]]
             (< (p 1) 0.0) [nil [{:kind :splash :point p}]]
             (or (> (:t sh) SHELL-LIFETIME)
-                (> (Math/abs (p 0)) ARENA-LIMIT)
-                (> (Math/abs (p 2)) ARENA-LIMIT))
+                (> (flat-range (or (:from sh) p) p) SHELL-REACH))
             [nil []]
             :else (recur (inc i) sh)))))))
 

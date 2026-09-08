@@ -51,6 +51,27 @@
 (defonce restart* (volatile! false))  ; (vreset! voxel.main/restart* true)
 (defonce shot* (volatile! nil))       ; (vreset! voxel.main/shot* "live.png")
 
+;; where the camera is right now, eased toward where the framing wants it
+(defonce camera* (volatile! nil))
+
+(def ^:private CAMERA-EASE 2.5)   ; how fast it catches up, per second
+
+(defn- follow!
+  "Slide and zoom the camera toward holding every live hull, and report
+  where it ended up. Eased rather than snapped: the framing jumps whenever a
+  ship sinks or the zoom hits its stop, and the eye notices."
+  [world dt]
+  (let [want (cam/frame (map :pos (remove :sunk (vals (:ships world)))))
+        cur (or @camera* want)
+        k (min 1.0 (* CAMERA-EASE dt))
+        ease (fn [a b] (+ a (* k (- b a))))
+        target (mapv ease (:target cur) (:target want))
+        next {:target target
+              :fovy (ease (:fovy cur) (:fovy want))
+              :pos (mapv + target cam/OFFSET)}]
+    (vreset! camera* next)
+    next))
+
 (defn- spawn-debris
   "Blasts and splashes kick up debris and spray cubes."
   [debris events]
@@ -134,13 +155,22 @@
                                 (and (not= :game screen)
                                      (or (:pressed? in) (:restart? in)))
                                 (and (= :game screen) (:restart? in)))
-                _ (when restart-now (vreset! restart* false) (phys/init!))
+                _ (when restart-now
+                    (vreset! restart* false)
+                    (vreset! camera* nil)
+                    (phys/init!))
                 world (if restart-now (w/initial-state) world)
                 screen (if restart-now :game screen)
                 consumed (if restart-now 0 consumed)
+                ;; the camera follows the battle, and the simulated window
+                ;; of water follows the camera, so the sea has no edge to
+                ;; sail off - it is recentred before anything reads it
+                camera (follow! world dt)
+                _ (sea/recenter! (:ocean world)
+                                 ((:target camera) 0) ((:target camera) 2))
                 aim (input/sea-point (:mx in) (:my in) WIDTH HEIGHT
-                                     render/CAMERA-POS render/CAMERA-TARGET
-                                     render/FOVY render/CAMERA-ORTHO)
+                                     (:pos camera) (:target camera)
+                                     (:fovy camera) render/CAMERA-ORTHO)
                ;; scripted smoke-test shot: one salvo at the enemy
                autofire? (and (= :game screen)
                               (or (= frame autofire-frame)
@@ -211,6 +241,7 @@
           (render/draw-frame! {:world world
                                :ui {:aim aim :mx (:mx in) :my (:my in)}
                                :debris debris'
+                               :camera camera
                                :width WIDTH :height HEIGHT
                                :screen (end-screen screen world)})
           (rl/maybe-screenshot! frame shot-frame)

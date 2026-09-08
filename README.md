@@ -8,15 +8,18 @@ prototype rendered with raylib and simulated with Box3D.
 
 ## What is simulated
 
-- **Ocean** — a 2D vortex-particle field covering the whole visible arena,
-  one particle per tile. Ships shed vorticity off both sides of their track,
-  blasts inject swirl, spray flies ballistically and splashes back. Velocity
-  is evaluated per particle with a Greengard adaptive quadtree FMM; a
-  scattering of live vortices is summed exactly instead, and dead-calm water
-  costs nothing. The drawn surface is the particle set — one mesh vertex per
-  particle, heights straight off the simulation, nothing analytic mixed in —
-  and the sheet is sized from the camera so the water always runs past the
-  frame.
+- **Ocean** — a 2D vortex-particle field, one particle per tile. Ships shed
+  vorticity off both sides of their track, blasts inject swirl, spray flies
+  ballistically and splashes back. Velocity is evaluated per particle with a
+  Greengard adaptive quadtree FMM; a scattering of live vortices is summed
+  exactly instead, and dead-calm water costs nothing. The drawn surface is
+  the particle set — one mesh vertex per particle, heights straight off the
+  simulation, nothing analytic mixed in.
+
+  The simulated water is a fixed window that scrolls with the camera: water
+  leaving the trailing edge comes back as still water at the leading one, so
+  the sea has no edge to sail off and no bound on where a battle can go,
+  while costing a fixed ~9k particles wherever it happens.
 - **Floatation** — buoyancy via the divergence theorem over each hull's
   surface mesh, clipped at the plane fitted to the particles under that hull.
   Ships heave on the swell and the wave slope under them rolls and pitches
@@ -32,6 +35,10 @@ prototype rendered with raylib and simulated with Box3D.
   propulsion acts through the centre of mass, so putting the helm over
   changes where a ship ends up rather than just which way she points. That is
   what makes evasion mean anything.
+- **Camera** — an orthographic isometric vantage that slides over the point
+  between the fleets and zooms to hold them both, from the opening approach
+  to a knife fight. It only ever slides and zooms, never turns, which is what
+  lets the ocean be a window that scrolls beneath it.
 
 ## Requirements
 
@@ -74,8 +81,9 @@ if the range falls to where the hulls could touch.
   native kernel below is held to it step for step by the tests
 - `src/voxel/buoyancy.clj` — divergence-theorem buoyancy on meshes clipped at
   an arbitrary water plane
-- `src/voxel/camera.clj` — the vantage, and the sea footprint the ocean sizes
-  itself from. Pure, so both the renderer and the world can read it
+- `src/voxel/camera.clj` — the vantage, how it frames the fleets, and the sea
+  footprint the ocean sizes itself from. Pure, so both the renderer and the
+  world can read it
 - `src/voxel/ship.clj` — the dreadnought voxel layout
 - `src/voxel/mesh.clj` — voxel surface extraction, and the divergence-theorem
   volume/centroid sums written out plainly

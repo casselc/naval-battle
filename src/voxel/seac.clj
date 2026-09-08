@@ -18,7 +18,8 @@
    :pointer :pointer :int64] :void)
 
 (ffi/defcfn fmm* "vsea_fmm"
-  [:pointer :pointer :pointer :int64 :int64 :double :pointer :pointer] :void)
+  [:pointer :pointer :pointer :int64 :int64 :double :double :double
+   :pointer :pointer] :void)
 
 (ffi/defcfn mesh-init* "vsea_mesh_init" [] :void)
 (ffi/defcfn mesh-update* "vsea_mesh_update"
@@ -173,6 +174,8 @@
 (ffi/defcfn sim-time* "vsea_sim_time" [] :double)
 (ffi/defcfn sim-circulation* "vsea_sim_circulation" [] :double)
 (ffi/defcfn sim-height* "vsea_sim_height" [:double :double] :double)
+(ffi/defcfn sim-recenter* "vsea_sim_recenter" [:double :double] :void)
+(ffi/defcfn sim-origin* "vsea_sim_origin" [:pointer] :void)
 (ffi/defcfn sim-step* "vsea_sim_step"
   [:double :pointer :int64 :pointer :int64] :void)
 (ffi/defcfn sim-load* "vsea_sim_load"
@@ -221,6 +224,21 @@
   "Water surface height at (x, z), bilinear over the particle lattice."
   [x z]
   (sim-height* (double x) (double z)))
+
+(defn sim-recenter!
+  "Slide the simulated window of water so it is centred on (x, z), snapped
+  to whole tiles. Water already in the window keeps its state and its place
+  in the world; the strip that has just come into view is seeded still."
+  [x z]
+  (sim-recenter* (double x) (double z)))
+
+(defn sim-origin
+  "Where the centre of the simulated window sits in the world, as [x z]."
+  []
+  (ensure-mesh-buffers!)
+  (let [b (ffi/alloc 16)]
+    (sim-origin* b)
+    [(ffi/read b :double 0) (ffi/read b :double 8)]))
 
 (def ^:private MAX-COUPLINGS 64)
 
@@ -346,7 +364,8 @@
   FMM: the same field as voxel.ocean/fmm-velocities (same tree, same
   expansion conventions) at native speed, for fully-churned seas where
   every particle is active."
-  [ps p bounds]
+  ([ps p bounds] (fmm ps p bounds 0.0 0.0))
+  ([ps p bounds cx cz]
   (let [n (count ps)]
     (ensure-buffers! n)
     (let [[_cap xs zs om _act vx vz] @bufs]
@@ -355,9 +374,10 @@
           (ffi/write xs :double (double (:x pc)) (* 8 i))
           (ffi/write zs :double (double (:z pc)) (* 8 i))
           (ffi/write om :double (double (:omega pc)) (* 8 i))))
-      (fmm* xs zs om (long n) (long p) (double bounds) vx vz)
+      (fmm* xs zs om (long n) (long p) (double bounds)
+            (double cx) (double cz) vx vz)
       (mapv (fn [i]
               [(ffi/read vx :double (* 8 i))
                0.0
                (ffi/read vz :double (* 8 i))])
-            (range n)))))
+            (range n))))))

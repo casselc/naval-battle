@@ -555,3 +555,76 @@
                " - four times the steps must not mean four times the sea"))
       (is (< 0.85 (/ om-fine om-coarse) 1.15)
           (str "vorticity ratio " (/ om-fine om-coarse))))))
+
+;; --- the window of water follows the camera ---------------------------------
+;;
+;; The simulated sea is a fixed lattice that scrolls. Water leaving the
+;; trailing edge comes back as still water at the leading one, so a battle can
+;; sail anywhere without the ocean either ending or costing more.
+
+(defn- native-sheet-at
+  [cols extent]
+  (seac/sim-init! cols extent (+ extent 4.0) true sea/VISCOSITY sea/SPARSE-MAX)
+  (seac/sim-step! 0.05 [{:x 0.0 :z 0.0 :r 10.0 :power 8.0}] nil))
+
+(deftest the-window-scrolls-with-the-view
+  (testing "recentring moves the sheet and costs no extra water"
+    (native-sheet-at 25 24.0)
+    (let [n (seac/sim-count)]
+      (is (= [0.0 0.0] (seac/sim-origin)))
+      (seac/sim-recenter! 40.0 -18.0)
+      (is (= n (seac/sim-count)) "the same particles, somewhere else")
+      (let [[ox oz] (seac/sim-origin)
+            sp (seac/sim-spacing)]
+        ;; snapped to whole tiles, so the lattice never slides between cells
+        (is (< (Math/abs (- ox 40.0)) sp))
+        (is (< (Math/abs (- oz -18.0)) sp))
+        (is (< (Math/abs (- ox (* sp (Math/round (/ ox sp))))) 1e-9)
+            "origin lands on a tile boundary"))
+      (let [xs (map :x (seac/sim-particles))]
+        (is (> (apply min xs) 0.0) "the whole sheet moved with the view"))
+      (seac/sim-free!)))
+
+  (testing "water already in view keeps its state and its place"
+    (native-sheet-at 25 24.0)
+    (let [before (map (fn [x] [x (seac/sim-height x 0.0)]) (range -8 9 4))]
+      ;; slide by a couple of tiles: everything sampled above is still inside
+      (seac/sim-recenter! (* 2.0 (seac/sim-spacing)) 0.0)
+      (doseq [[x h] before]
+        (is (< (Math/abs (- h (seac/sim-height x 0.0))) 1e-9)
+            (str "the sea at x=" x " changed when the camera moved")))
+      (seac/sim-free!)))
+
+  (testing "water sailing into view is fresh, not wrapped-around wake"
+    (native-sheet-at 25 24.0)
+    (let [sp (seac/sim-spacing)
+          extent (seac/sim-extent)]
+      (seac/sim-recenter! (* 3.0 sp) 0.0)
+      ;; the outermost column is one of the three that just came in
+      (let [edge (- (+ (* 3.0 sp) extent) (* 0.5 sp))
+            lead (filter #(> (:x %) edge) (seac/sim-particles))]
+        (is (pos? (count lead)))
+        (is (every? #(and (zero? (:y %)) (zero? (:omega %))
+                          (zero? (:vx %)) (zero? (:vy %)) (zero? (:vz %)))
+                    lead)
+            "new water arrives still")))
+    (seac/sim-free!))
+
+  (testing "a jump clear of the old window starts a fresh sea"
+    (native-sheet-at 25 24.0)
+    (seac/sim-recenter! 5000.0 5000.0)
+    (let [ps (seac/sim-particles)]
+      (is (every? #(and (zero? (:y %)) (zero? (:omega %))) ps))
+      (is (> (apply min (map :x ps)) 4000.0)))
+    (seac/sim-free!))
+
+  (testing "and it keeps simulating out there, far from the world origin"
+    (native-sheet-at 25 24.0)
+    (seac/sim-recenter! 4000.0 -4000.0)
+    (seac/sim-step! 0.05 [{:x 4000.0 :z -4000.0 :r 10.0 :power 8.0}] nil)
+    (dotimes [_ 5] (seac/sim-step! 0.02 nil nil))
+    (is (> (seac/sim-height 4000.0 -4000.0) 0.0)
+        "a blast four thousand units out still lifts the water")
+    (is (every? #(< (Math/abs (:x %)) 1e9) (seac/sim-particles))
+        "and nothing has run away")
+    (seac/sim-free!)))
