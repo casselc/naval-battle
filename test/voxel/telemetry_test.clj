@@ -1,0 +1,163 @@
+(ns voxel.telemetry-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [oscope.embedded :as embedded]
+            [oscope.sample :as sample]
+            [voxel.telemetry.config :as config]
+            [voxel.telemetry.hud :as hud]
+            [voxel.telemetry.runtime :as runtime]
+            [voxel.telemetry.viewer :as viewer]))
+
+(deftest viewer-has-no-otlp-ingress-and-keeps-queries-bounded
+  (let [seen (atom nil)
+        source {:load-command
+                (fn [_ selection]
+                  (reset! seen selection)
+                  (sample/screen-for-selection selection))
+                :export-admission {:capacity 1 :active (atom 0)}}
+        app (viewer/handler
+             {:authority "127.0.0.1:4320"
+              :workbench-handler (constantly {:status 200 :body "traces"})
+              :events-handler (constantly {:status 200 :body "events"})
+              :aggregate-handler
+              ((requiring-resolve 'oscope.ui.web/handler) source)
+              :editor-handler (constantly {:status 200 :body "editor"})})
+        request {:request-method :get
+                 :headers {"Host" "127.0.0.1:4320"}}]
+    (testing "collector endpoints do not exist in the viewer-only router"
+      (is (= 404 (:status (app (assoc request :uri "/v1/traces")))))
+      (is (= 404 (:status (app (assoc request :uri "/v1/logs")))))
+      (is (= 404 (:status (app (assoc request :uri "/v1/metrics"))))))
+    (testing "oversized query limits fall back inside oscope's bounded policy"
+      (is (= 200 (:status
+                  (app (assoc request :uri "/oscope"
+                              :query-string "signal=spans&field=span-name&limit=999")))))
+      (is (<= (:limit @seen) 100)))
+    (testing "DNS rebinding protection is retained"
+      (is (= 421 (:status
+                  (app (assoc request :uri "/healthz"
+                              :headers {"Host" "game.example"}))))))))
+
+(deftest composition-validates-before-effects-and-stops-viewer-first
+  (let [events (atom [])
+        embedded-runtime {:source ::source :connection ::connection}
+        viewer-runtime {:url "http://127.0.0.1:4320/oscope/telemetry"}]
+    (with-redefs [jdbc.chdb.durable.local-posix/local-backend
+                  (fn [root]
+                    (swap! events conj [:storage root])
+                    ::backend)
+                  embedded/start!
+                  (fn [options]
+                    (swap! events conj [:embedded-start options])
+                    embedded-runtime)
+                  hud/start!
+                  (fn [source options]
+                    (is (= ::source source))
+                    (swap! events conj [:hud-start options])
+                    ::hud)
+                  viewer/start!
+                  (fn [options]
+                    (swap! events conj [:viewer-start options])
+                    viewer-runtime)
+                  viewer/stop!
+                  (fn [actual]
+                    (is (= viewer-runtime actual))
+                    (swap! events conj :viewer-stop)
+                    true)
+                  hud/stop!
+                  (fn [actual]
+                    (is (= ::hud actual))
+                    (swap! events conj :hud-stop)
+                    true)
+                  embedded/stop!
+                  (fn [actual]
+                    (is (= embedded-runtime actual))
+                    (swap! events conj :embedded-stop)
+                    {:status :closed :phase :closed})]
+      (is (thrown? Exception
+                   (runtime/start! {:host "0.0.0.0"})))
+      (is (empty? @events))
+      (let [lifecycle (runtime/start! {:storage-root "./telemetry-test"
+                                       :port 4320})]
+        (is (= {:status :closed :phase :closed}
+               (runtime/stop-until-closed! lifecycle)))
+        (is (= {:status :closed :phase :closed}
+               (runtime/stop! lifecycle)))
+        (is (= :viewer-stop (nth @events 4)))
+        (is (= :hud-stop (nth @events 5)))
+        (is (= :embedded-stop (nth @events 6)))))))
+
+(deftest failed-viewer-start-closes-the-embedded-runtime
+  (let [events (atom [])
+        embedded-runtime {:source ::source :connection ::connection}]
+    (with-redefs [jdbc.chdb.durable.local-posix/local-backend (constantly ::backend)
+                  embedded/start! (fn [_]
+                                    (swap! events conj :embedded-start)
+                                    embedded-runtime)
+                  hud/start! (fn [_ _]
+                               (swap! events conj :hud-start)
+                               ::hud)
+                  hud/stop! (fn [_]
+                              (swap! events conj :hud-stop)
+                              true)
+                  viewer/start! (fn [_]
+                                  (swap! events conj :viewer-fail)
+                                  (throw (ex-info "bind failed" {})))
+                  embedded/stop! (fn [_]
+                                   (swap! events conj :embedded-stop)
+                                   {:status :closed :phase :closed})]
+      (is (thrown? Exception (runtime/start! {})))
+      (is (= [:embedded-start :hud-start :viewer-fail :hud-stop :embedded-stop]
+             @events)))))
+
+(deftest hud-queries-only-on-its-worker-and-snapshot-is-memory-only
+  (let [calls (atom 0)
+        sampler (hud/start!
+                 ::source
+                 {:interval-ms 1
+                  :load-model-fn
+                  #(do (swap! calls inc)
+                       {:status :ready :sampled-at-unix-ms 1
+                        :spans [{:value "game.frame" :count 2}]
+                        :metrics []})})]
+    (try
+      (let [first-read
+            (loop [remaining 100]
+              (let [model (hud/snapshot sampler)]
+                (if (or (= :ready (:status model)) (zero? remaining))
+                  model
+                  (do (Thread/sleep 10) (recur (dec remaining))))))
+            before @calls
+            second-read (hud/snapshot sampler)]
+        (is (= :ready (:status first-read)))
+        (is (= first-read second-read))
+        (is (= before @calls)
+            "render-side snapshots do not invoke the query function"))
+      (finally
+        (is (true? (hud/stop! sampler)))))))
+
+(deftest hud-model-uses-only-fixed-small-queries
+  (let [selections (atom [])
+        source {:load-command
+                (fn [_ selection]
+                  (swap! selections conj selection)
+                  {:table {:rows [{:value "sample" :count 1}]}})}
+        model (hud/load-model source 42)]
+    (is (= :ready (:status model)))
+    (is (= 42 (:sampled-at-unix-ms model)))
+    (is (= [hud/span-selection hud/metric-selection] @selections))
+    (is (every? #(= 6 (:limit %)) @selections))))
+
+(deftest environment-configuration-is-bounded-and-explicit
+  (let [env {"VOXEL_OTEL_VIEWER_PORT" "0"
+             "VOXEL_OTEL_STORAGE_ROOT" "/tmp/naval-telemetry"
+             "VOXEL_OTEL_OBJECT_ID" "case-study"
+             "OTEL_SERVICE_NAME" "naval-battle-acceptance"}
+        options (config/env-options env)]
+    (is (= 0 (:port options)))
+    (is (= "/tmp/naval-telemetry" (:storage-root options)))
+    (is (= "case-study" (:object-id options)))
+    (is (= "naval-battle-acceptance"
+           (get-in options [:sdk-options :service-name])))
+    (is (= "127.0.0.1" (:host options))))
+  (is (thrown? Exception
+               (config/env-options {"VOXEL_OTEL_VIEWER_PORT" "70000"}))))

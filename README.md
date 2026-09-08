@@ -74,6 +74,52 @@ jolt -M:test    # run the test suite
 All three native tasks are mtime-checked, so they are cheap to put in front
 of a run.
 
+### Opt-in embedded telemetry case study
+
+The `:telemetry` profile wraps the unchanged game entry point with an in-process
+OpenTelemetry SDK, a Durable local chDB store, and an oscope viewer bound only
+to loopback:
+
+```sh
+jolt -M:telemetry
+# [voxel] embedded telemetry viewer: http://127.0.0.1:4320/oscope/telemetry
+```
+
+The game-to-exporter path has no OTLP JSON, HTTP framing, or receiver. HTTP is
+used only for the adjacent human viewer. Data is stored under
+`./naval-telemetry` by default and survives a process restart. Override the
+non-secret launcher choices with `VOXEL_OTEL_STORAGE_ROOT`,
+`VOXEL_OTEL_OBJECT_ID`, and `VOXEL_OTEL_VIEWER_PORT` (use `0` for an ephemeral
+port). The viewer host is deliberately restricted to `127.0.0.1`.
+
+Durable chDB currently requires the separately qualified chDB core
+26.7.2-rc.2 ABI. The stable 26.7.0 library installed by default lacks that ABI;
+point `JOLT_CHDB_LIB` at the qualified library before using this profile.
+
+This profile is separate so ordinary builds and tests do not resolve oscope,
+chDB, or the OTel SDK. It is intended to be paired with the aspect-instrumented
+build: advice observes existing game/runtime call sites without adding
+telemetry calls to gameplay namespaces.
+
+The optional in-game HUD advice reads `voxel.telemetry.hud/snapshot`. A Jolt
+fiber schedules and publishes that immutable model once per second; one owned
+OS thread executes the two fixed six-row JDBC queries because the blocking
+Durable connection boundary cannot park a fiber while holding its connection
+lock. Shutdown joins both before oscope closes the source. The render thread
+never waits on chDB. The intended join point is call advice on
+`voxel.raylib/end-drawing` from `voxel.render`, while the frame is still open.
+
+This is phase two of the case study. Phase one keeps oscope in a separate
+process as the OTLP receiver/viewer and runs the woven game with the standard
+`OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME=naval-battle` settings.
+Phase two selects `:telemetry`, retains the same service/resource identity, and
+replaces only the exporter/collector transport with the in-process Durable
+composition.
+
+`sha256sum -c resources/telemetry/gameplay-source.sha256` verifies that every
+pre-existing gameplay namespace and native simulation source still matches the
+fork point used by this case study.
+
 ## Controls
 
 - Arrow keys steer your ship

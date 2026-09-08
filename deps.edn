@@ -101,4 +101,23 @@
  :aliases {:test {:extra-paths ["test"]
                   :main-opts ["-m" "voxel.test-runner"]}
            :run  {:main-opts ["-m" "voxel.main"]}
-           :b3probe {:main-opts ["-m" "voxel.b3-probe"]}}}
+           :b3probe {:main-opts ["-m" "voxel.b3-probe"]}
+
+           ;; Opt-in only: the normal game and test profiles do not resolve
+           ;; chDB, oscope, or the OTel SDK. This launcher surrounds the
+           ;; unchanged game entry point with a Durable in-process collector
+           ;; and a read-only loopback viewer.
+           :telemetry
+           {:extra-deps
+             {io.github.chucklehead-dev/oscope
+             {:git/url "https://github.com/chucklehead-dev/oscope.git"
+              :git/sha "4770e817ad3821c9d060d4fe4dc6ef1f32bf0420"}}
+            :main-opts ["-m" "voxel.telemetry.main"]}
+
+           :test-telemetry
+           {:extra-paths ["test"]
+            :extra-deps
+            {io.github.chucklehead-dev/oscope
+             {:git/url "https://github.com/chucklehead-dev/oscope.git"
+              :git/sha "4770e817ad3821c9d060d4fe4dc6ef1f32bf0420"}}
+            :main-opts ["-m" "voxel.telemetry-test-runner"]}}}
