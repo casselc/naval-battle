@@ -18,7 +18,7 @@
 #include <string.h>
 #include <math.h>
 
-#define HULL_MAX 8
+#define HULL_MAX 64
 #define HULL_MAX_CELLS 262144
 
 typedef struct {

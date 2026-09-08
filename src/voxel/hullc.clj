@@ -20,7 +20,7 @@
 (ffi/defcfn hull-metrics* "vsea_hull_metrics"
   [:int64 :pointer :pointer :pointer :pointer] :void)
 
-(def MAX-HULLS 8)
+(def MAX-HULLS 64)
 
 (def ^:private bufs
   "Per-call scratch, grown on demand. The frame loop is single-threaded and

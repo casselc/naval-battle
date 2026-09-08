@@ -75,7 +75,9 @@
 (defn- claim-hull!
   []
   (let [used (set (vals @hulls*))]
-    (first (remove used (range hullc/MAX-HULLS)))))
+    (or (first (remove used (range hullc/MAX-HULLS)))
+        (throw (ex-info "no free hull slot in the floatation kernel"
+                        {:live (count used) :max hullc/MAX-HULLS})))))
 
 (defn- hull-record
   "Rebuild everything derived from a body's cells: the native surface mesh,
