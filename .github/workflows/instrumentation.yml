@@ -93,11 +93,7 @@ jobs:
 
       - name: Verify embedded telemetry lifecycle
         working-directory: ${{ runner.temp }}
-        run: >-
-          jolt -Srepro
-          -Sdeps '{:paths ["${{ github.workspace }}/src"
-                           "${{ github.workspace }}/test"]
-                   :deps {io.github.chucklehead-dev/oscope
-                          {:git/url "https://github.com/chucklehead-dev/oscope.git"
-                           :git/sha "4770e817ad3821c9d060d4fe4dc6ef1f32bf0420"}}}'
-          -M -m voxel.telemetry-test-runner
+        run: |
+          jolt -Srepro \
+            -Sdeps '{:paths ["${{ github.workspace }}/src" "${{ github.workspace }}/test"] :deps {io.github.chucklehead-dev/oscope {:git/url "https://github.com/chucklehead-dev/oscope.git" :git/sha "4770e817ad3821c9d060d4fe4dc6ef1f32bf0420"}}}' \
+            -M -m voxel.telemetry-test-runner
