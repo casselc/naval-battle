@@ -191,7 +191,7 @@
       (reset! sim-bufs
               (into {:cap cap
                      :blasts (ffi/alloc (* 8 4 64))
-                     :hulls (ffi/alloc (* 8 5 64))}
+                     :hulls (ffi/alloc (* 8 7 64))}
                     (map (fn [k] [k (ffi/alloc (* 8 cap))]))
                     [:x :z :y :vx :vy :vz :om])))))
 
@@ -235,11 +235,11 @@
 
 (defn sim-step!
   "Advance the native ocean dt seconds under this frame's couplings.
-  blasts are {:x :z :r :power}, hulls {:x :z :r :push :swirl}."
+  blasts are {:x :z :r :power}, hulls {:x :z :r :push :swirl :hx :hz}."
   [dt blasts hulls]
   (let [b @sim-bufs
         nb (write-pack! (:blasts b) blasts [:x :z :r :power])
-        nh (write-pack! (:hulls b) hulls [:x :z :r :push :swirl])]
+        nh (write-pack! (:hulls b) hulls [:x :z :r :push :swirl :hx :hz])]
     (sim-step* (double dt) (:blasts b) (long nb) (:hulls b) (long nh))))
 
 (defn sim-particles

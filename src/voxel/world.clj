@@ -299,14 +299,38 @@
                             s)]))
                   ships))))
 
+(def ^:private WAKE-STATIONS
+  "Where along the keel a hull is coupled to the water, as a fraction of its
+  half-length. One disc at the anchor leaves most of a 26-unit hull touching
+  nothing; three make the wake the shape of the ship."
+  [-0.7 0.0 0.7])
+(def ^:private WAKE-RADIUS 6.0)
+;; the couplings share one hull's worth of momentum between them - three
+;; stations at full strength would put three ships' wash into the water
+(def ^:private WAKE-SHARE (/ 1.0 (double (count WAKE-STATIONS))))
+
 (defn- hulls-of
-  "The coupling each floating hull feeds the ocean: displacement push and
-  wake vorticity scaled by speed (a becalmed ship leaves still water)."
+  "The couplings each floating hull feeds the ocean: displacement push and
+  wake vorticity scaled by speed (a becalmed ship leaves still water), shed
+  at stations along the keel. hx/hz is her heading, which signs which side of
+  the track the swirl comes off."
   [st]
-  (for [[_ s] (:ships st) :when (not (:sunk s))]
-    (let [v (or (:speed s) 0.0)]
-      {:x ((:pos s) 0) :z ((:pos s) 2) :r 5.0
-       :push (* 0.6 v) :swirl (* 0.3 v)})))
+  (for [[_ s] (:ships st)
+        :when (not (:sunk s))
+        :let [v (or (:speed s) 0.0)
+              [bx _ bz] (bow-dir s)
+              [vx _ vz] (or (:vel s) [0.0 0.0 0.0])
+              sp (Math/sqrt (+ (* vx vx) (* vz vz)))
+              ;; heading is the course made good while she has way on,
+              ;; otherwise where her bow points
+              [hx hz] (if (> sp 1e-3) [(/ vx sp) (/ vz sp)] [bx bz])
+              half (* 0.5 ship/LENGTH)]
+        f WAKE-STATIONS]
+    {:x (+ ((:pos s) 0) (* bx f half))
+     :z (+ ((:pos s) 2) (* bz f half))
+     :r WAKE-RADIUS
+     :push (* 0.6 v WAKE-SHARE) :swirl (* 0.3 v WAKE-SHARE)
+     :hx hx :hz hz}))
 
 (defn- decide
   "The battle is over once exactly one fleet is still afloat."

@@ -20,6 +20,27 @@
     (sea/make-ocean
      (mapv (fn [_] {:x (u) :z (u) :omega (* 2.0 (u))}) (range n)))))
 
+(defn- spread-cloud
+  "n particles uniform over [-span, span]^2 with random vorticity. Unlike
+  random-cloud this actually fills the FMM domain, so the tree is deep and
+  most pairs are far field."
+  [n span seed]
+  (let [r (lcg seed)
+        u (fn [s] (- (* 2.0 s (/ (rem (r) 1000000) 1000000.0)) s))]
+    (sea/make-ocean
+     (mapv (fn [_] {:x (u span) :z (u span) :omega (* 2.0 (u 1.0))}) (range n)))))
+
+(defn- worst-error
+  "Largest absolute velocity error between two per-particle fields, and the
+  largest speed in the reference - the scale that error is judged against."
+  [ref got]
+  (let [err (map (fn [[a _ c] [p _ q]]
+                   (Math/sqrt (+ (* (- a p) (- a p)) (* (- c q) (- c q)))))
+                 ref got)
+        scale (apply max 1e-12 (map (fn [[u _ w]]
+                                      (Math/sqrt (+ (* u u) (* w w)))) ref))]
+    [(apply max err) scale]))
+
 ;; --- single vortices: the analytic oracle ---------------------------------------
 
 (deftest single-vortex-velocity
@@ -50,14 +71,50 @@
           seed [7 42]]
     (testing (str "n=" n " seed=" seed ": FMM velocities match direct summation")
       (let [oc (random-cloud n seed)
-            direct (sea/direct-velocities oc)
-            fast (sea/fmm-velocities oc)
-            scale (apply max (cons 1.0 (map (fn [[u _]] (max (Math/abs u) 1e-9)) direct)))]
-        (is (every? (fn [[d f]]
-                      (let [dx (- (first d) (first f))
-                            dz (- (nth d 2) (nth f 2))]
-                        (< (Math/sqrt (+ (* dx dx) (* dz dz))) (* 1e-4 scale))))
-                    (mapv vector direct fast)))))))
+            [err scale] (worst-error (sea/direct-velocities oc)
+                                     (sea/fmm-velocities oc))]
+        (is (< err (* 1e-4 scale)))))))
+
+(deftest fmm-multipole-passes-are-exercised-and-accurate
+  ;; random-cloud sits in [-1,1] inside a +/-58 domain, so at MAX-DEPTH the
+  ;; whole cloud fits in a couple of leaf cells, every pair is near field and
+  ;; the test above compares direct summation against itself. These spread
+  ;; the particles over the domain, where the expansions actually carry the
+  ;; field, and hold the truncation error to the order-P bound.
+  (doseq [span [10.0 50.0]
+          n [300 800]]
+    (testing (str "span=" span " n=" n ": far-field expansions are accurate")
+      (let [oc (spread-cloud n span 11)
+            [err scale] (worst-error (sea/direct-velocities oc)
+                                     (sea/fmm-velocities oc))]
+        (is (pos? err) "the far field is approximated, not summed exactly")
+        (is (< err (* 1e-4 scale))
+            (str "relative error " (/ err scale) " at expansion order "
+                 sea/EXPANSION-P))))))
+
+(deftest fmm-is-exact-when-everything-is-near-field
+  (testing "a cloud small enough to sit in one leaf neighbourhood is summed
+            directly, so it agrees with the oracle to rounding"
+    (let [oc (random-cloud 200 7)
+          [err _] (worst-error (sea/direct-velocities oc)
+                               (sea/fmm-velocities oc))]
+      (is (< err 1e-12) "no expansion is involved at this scale"))))
+
+(deftest fmm-splits-far-from-near-the-way-the-pure-tree-does
+  (testing "two tight clumps far apart: each clump is exact within itself and
+            approximate across the gap, which is the multipole path"
+    (let [clump (fn [cx r]
+                  (mapv (fn [i]
+                          (let [a (* 2.0 Math/PI (/ i 40.0))]
+                            {:x (+ cx (* r (Math/cos a)))
+                             :z (* r (Math/sin a))
+                             :omega (if (even? i) 1.0 -0.6)}))
+                        (range 40)))
+          oc (sea/make-ocean (into (clump -30.0 1.0) (clump 30.0 1.0)))
+          [err scale] (worst-error (sea/direct-velocities oc)
+                                   (sea/fmm-velocities oc))]
+      (is (pos? err))
+      (is (< err (* 1e-5 scale))))))
 
 (deftest fmm-field-is-finite-on-distinct-clouds
   (testing "near + far FMM field stays finite on a cloud with no duplicated positions"
@@ -121,7 +178,9 @@
           "not every particle keeps its initial vorticity under a swirl kick")))
   (testing "a hull displacement pushes water outward"
     (let [oc (random-cloud 16 11)
-          oc' (sea/step-ocean oc 0.016 nil [{:x 0.0 :z 0.0 :r 0.5 :push 4.0 :swirl 0.3}])]
+          oc' (sea/step-ocean oc 0.016 nil
+                              [{:x 0.0 :z 0.0 :r 0.5 :push 4.0 :swirl 0.3
+                                :hx 0.0 :hz 1.0}])]
       (is (some (fn [p] (> (+ (* (:x p) (:x p)) (* (:z p) (:z p)))
                            1.0))
                 (:particles oc'))
@@ -272,7 +331,8 @@
                      :omega (u -1.5 1.5)}))
           [pure0] (native-sheet cols extent bounds ps true sea/SPARSE-MAX)
           blasts [{:x 2.0 :z -3.0 :r 4.0 :power 6.0}]
-          hulls [{:x -5.0 :z 1.0 :r 5.0 :push 0.8 :swirl 0.4}]]
+          hulls [{:x -5.0 :z 1.0 :r 5.0 :push 0.8 :swirl 0.4
+                  :hx 0.6 :hz 0.8}]]
       (loop [k 0 pure pure0]
         (when (< k 6)
           ;; couplings on the first step only, then free evolution
@@ -333,3 +393,55 @@
                 (is (< d 1e-9) (str "fmm step " k " drift " d)))
               (recur (inc k) pure')))))
       (seac/sim-free!))))
+
+;; --- the ambient sea, and the wake a ship leaves in it ----------------------
+
+(deftest the-swell-is-a-sea-state-not-one-sinusoid
+  (testing "several wave trains at distinct wavelengths and headings"
+    (is (>= (count sea/SWELL-TRAINS) 3))
+    (is (apply distinct? (map second sea/SWELL-TRAINS)) "distinct wavenumbers")
+    (is (apply distinct? (map #(nth % 2) sea/SWELL-TRAINS))
+        "distinct frequencies"))
+  (testing "the surface does not repeat one wavelength along the main swell"
+    ;; a single train is exactly periodic along its heading; a sea is not
+    (let [[_ k _ dx dz] (first sea/SWELL-TRAINS)
+          lambda (/ (* 2.0 Math/PI) k)
+          cols 41 extent 40.0
+          n (seac/sim-init! cols extent 44.0 true sea/VISCOSITY sea/SPARSE-MAX)]
+      (is (pos? n))
+      (dotimes [_ 40] (seac/sim-step! 0.02 nil nil))
+      (let [h (fn [x z] (seac/sim-height x z))
+            x0 0.0 z0 0.0
+            x1 (* dx lambda) z1 (* dz lambda)]
+        (is (> (Math/abs (- (h x0 z0) (h x1 z1))) 1e-4)
+            "one wavelength on, the water is at a different height"))
+      (seac/sim-free!))))
+
+(deftest a-wake-sheds-to-the-side-of-the-ships-track
+  (testing "port and starboard of the heading get opposite swirl"
+    (let [hull {:x 0.0 :z 0.0 :r 6.0 :push 0.0 :swirl 1.0 :hx 0.0 :hz 1.0}
+          ;; steaming toward +z: +x is starboard, -x is port
+          oc (assoc (sea/make-ocean [{:x 2.0 :z 0.0 :omega 0.0}
+                                     {:x -2.0 :z 0.0 :omega 0.0}])
+                    :ambient false)
+          [stbd port] (:particles (sea/step-ocean oc 0.016 nil [hull]))]
+      (is (neg? (:omega stbd)))
+      (is (pos? (:omega port)))
+      (is (near (- (:omega stbd)) (:omega port) 1e-12) "equal and opposite")))
+  (testing "the wake follows the ship round rather than a fixed diagonal"
+    ;; same water, hull on the reciprocal course: the swirl must flip
+    (let [ps [{:x 2.0 :z 0.0 :omega 0.0}]
+          swirl (fn [hz]
+                  (:omega (first (:particles
+                                  (sea/step-ocean
+                                   (assoc (sea/make-ocean ps) :ambient false)
+                                   0.016 nil
+                                   [{:x 0.0 :z 0.0 :r 6.0 :push 0.0
+                                     :swirl 1.0 :hx 0.0 :hz hz}])))))]
+      (is (neg? (swirl 1.0)))
+      (is (pos? (swirl -1.0)) "reciprocal course, opposite wake")))
+  (testing "a hull with no way on sheds nothing"
+    (let [oc (assoc (sea/make-ocean [{:x 2.0 :z 0.0 :omega 0.0}]) :ambient false)
+          out (sea/step-ocean oc 0.016 nil
+                              [{:x 0.0 :z 0.0 :r 6.0 :push 0.0 :swirl 1.0}])]
+      (is (zero? (:omega (first (:particles out))))))))

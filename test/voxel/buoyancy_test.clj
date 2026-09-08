@@ -298,3 +298,52 @@
     (let [bod (assoc (docked-ship) :flood 3.0)
           {:keys [force]} (b/flood-force bod [0.0 1.0 0.0 0.0])]
       (is (near-v [0.0 (- (* b/WATER-DENSITY b/GRAVITY 3.0)) 0.0] force)))))
+
+
+;; --- the shipped sums are the paper's sums -----------------------------------
+;;
+;; submerged-metrics fuses clipping, the volume sum and the three moment sums
+;; into one allocation-free pass because it runs per body per step. That makes
+;; it a second implementation of what voxel.mesh spells out straight from the
+;; divergence theorem, so these hold the two together: the readable version is
+;; the one that documents the algorithm, and it has to be the one that ships.
+
+(defn- posed-tris
+  "The body's closed surface mesh under its live pose, in world coordinates."
+  [bod]
+  (mapv (fn [t] (mapv #(b/body-point->world bod %) t))
+        (mesh/surface-triangles (:cells bod))))
+
+(deftest fused-sums-match-the-reference-transcription
+  (testing "fully submerged: the closed mesh needs no clipping at all"
+    (doseq [q [[0.0 0.0 0.0 1.0] (b/yaw-quat 0.9) (b/pitch-quat 0.4)]]
+      (let [bod (body (box-cells 3 2 4) [2.0 -30.0 -5.0] q)
+            m (b/submerged-metrics bod)
+            tris (posed-tris bod)]
+        (is (near (mesh/mesh-volume tris) (:volume m))
+            "V = (1/6) SUM (d1 x d2)_x (x0 + x1 + x2)")
+        (is (near-v (mesh/mesh-centroid tris) (:centroid m))))))
+  (testing "partially submerged: clip-below then the same reference sums"
+    (doseq [q [[0.0 0.0 0.0 1.0] (b/yaw-quat 0.6)]
+            y [-0.4 0.0 0.7]]
+      (let [bod (body (box-cells 3 3 3) [1.0 y 4.0] q)
+            m (b/submerged-metrics bod)
+            open (b/clip-below (posed-tris bod) b/WATER-LEVEL)]
+        (is (near (mesh/mesh-volume open) (:volume m))
+            "the open clipped mesh carries the closed solid's volume")
+        (when (pos? (:volume m))
+          (is (near-v (mesh/mesh-centroid open) (:centroid m)))))))
+  (testing "a breached hull, where the mesh has interior faces too"
+    (let [cells (disj (box-cells 4 3 4) [1 1 1] [2 1 2] [1 1 2] [0 0 0])
+          bod (body cells [0.0 -0.2 0.0] (b/yaw-quat 0.3))
+          m (b/submerged-metrics bod)
+          open (b/clip-below (posed-tris bod) b/WATER-LEVEL)]
+      (is (near (mesh/mesh-volume open) (:volume m)))
+      (is (near-v (mesh/mesh-centroid open) (:centroid m))))))
+
+(deftest a-unit-cell-displaces-exactly-one
+  (testing "the divergence sum on the simplest possible closed mesh"
+    (is (near 1.0 (mesh/mesh-volume (mesh/surface-triangles {[0 0 0] :hull}))))
+    (is (near 1.0 (:volume (b/submerged-metrics
+                            (body #{[0 0 0]} [0.0 -20.0 0.0]
+                                  [0.0 0.0 0.0 1.0])))))))

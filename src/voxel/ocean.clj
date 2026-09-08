@@ -49,10 +49,16 @@
 ;; ambient sea state: a travelling swell and slow turbulence eddies keep
 ;; the open water alive between battles. Both are deterministic functions
 ;; of (x, z, t), so every run - live or headless - shows the same sea.
-(def SWELL-AMP 0.45)        ; vertical orbital forcing, vy units/s
-(def SWELL-K 0.55)          ; wavenumber (~11-unit wavelength)
-(def SWELL-W 1.3)           ; angular frequency
-(def SWELL-DIR [0.86 0.51]) ; travel direction (diagonal across the arena)
+(def SWELL-TRAINS
+  "The ambient sea state, as [amplitude wavenumber frequency dir-x dir-z]
+  per wave train. A single train forces every particle in step along one
+  heading, which reads as a corrugated roof rather than open water; three at
+  different wavelengths, headings and speeds interfere into something that
+  looks like a sea. All of it forces the PARTICLES - the surface a player
+  sees is still just where the particles are."
+  [[0.45 0.55 1.30  0.86  0.51]    ; the main swell, ~11-unit wavelength
+   [0.22 0.31 0.83 -0.42  0.91]    ; a long cross swell from the beam
+   [0.11 1.15 2.10  0.62 -0.78]])  ; short wind chop across both
 (def CHOP-RATE 0.35)        ; seconds between eddy reshuffles
 (def CHOP-AMP 0.0009)       ; vorticity injected per second: visible swirl
 
@@ -71,15 +77,18 @@
   ocean reads as an active particle system even before the guns speak.
   Becalmed oceans (:ambient false) skip this."
   [ps t dt]
-  (let [kx (* SWELL-K (SWELL-DIR 0))
-        kz (* SWELL-K (SWELL-DIR 1))
-        kb (long (quot t CHOP-RATE))]
+  (let [kb (long (quot t CHOP-RATE))]
     (mapv (fn [p]
-            (let [ph (- (+ (* kx (:x p)) (* kz (:z p))) (* SWELL-W t))]
+            (let [x (:x p) z (:z p)
+                  lift (reduce (fn [acc [amp k w dx dz]]
+                                 (+ acc (* amp dt
+                                           (Math/sin (- (* k (+ (* dx x)
+                                                                (* dz z)))
+                                                        (* w t))))))
+                               0.0 SWELL-TRAINS)]
               (-> p
-                  (update :vy + (* SWELL-AMP dt (Math/sin ph)))
-                  (update :omega + (* CHOP-AMP dt
-                                         (chop-rand (:x p) (:z p) kb))))))
+                  (update :vy + lift)
+                  (update :omega + (* CHOP-AMP dt (chop-rand x z kb))))))
           ps)))
 (def IMPULSE-DRAG 0.90)
 
@@ -552,13 +561,19 @@
           ps)))
 
 (defn- apply-hulls
-  "Moving hulls [{:x :z :r :push :swirl}]: displace nearby water outward and
-  shed vorticity at the hull sides (the wake)."
+  "Moving hulls [{:x :z :r :push :swirl :hx :hz}]: displace nearby water
+  outward and shed vorticity at the hull sides (the wake).
+
+  The shed vorticity is signed by which side of the hull's TRACK the water
+  sits on - the y component of heading x offset - so port and starboard shed
+  opposite swirl and the wake follows the ship round. Signing it by
+  (nz - nx) instead, as this did, sheds on a fixed world diagonal whatever
+  course she steers."
   [ps hulls]
   (if (empty? hulls)
     ps
     (mapv (fn [p]
-            (reduce (fn [p {:keys [x z r push swirl]}]
+            (reduce (fn [p {:keys [x z r push swirl hx hz]}]
                       (let [dx (- (:x p) x)
                             dz (- (:z p) z)
                             d (Math/sqrt (+ (* dx dx) (* dz dz)))]
@@ -567,12 +582,18 @@
                           (let [w (- 1.0 (/ d r))
                                 d (max d 1e-6)
                                 nx (/ dx d)
-                                nz (/ dz d)]
+                                nz (/ dz d)
+                                ;; no heading means no way on, and a hull
+                                ;; sitting still sheds no wake
+                                hx (or hx 0.0)
+                                hz (or hz 0.0)]
                             (-> p
                                 (update :vx + (* push w nx))
                                 (update :vz + (* push w nz))
                                 (update :vy + (* 0.15 push w))
-                                (update :omega + (* swirl w (- nz nx))))))))
+                                (update :omega + (* swirl w
+                                                    (- (* hx nz)
+                                                       (* hz nx)))))))))
                     p hulls))
           ps)))
 

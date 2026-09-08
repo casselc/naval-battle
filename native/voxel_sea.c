@@ -502,11 +502,14 @@ void vsea_fmm(const double *xs, const double *zs, const double *om,
 // Every constant below mirrors voxel.ocean; voxel.ocean-test asserts they
 // have not drifted apart.
 
-#define SIM_SWELL_AMP   0.45
-#define SIM_SWELL_K     0.55
-#define SIM_SWELL_W     1.3
-#define SIM_SWELL_DIRX  0.86
-#define SIM_SWELL_DIRZ  0.51
+// the ambient sea state, mirroring voxel.ocean/SWELL-TRAINS:
+// {amplitude, wavenumber, frequency, dir x, dir z} per wave train
+#define SIM_SWELL_TRAINS 3
+static const double sim_swell[SIM_SWELL_TRAINS][5] = {
+	{0.45, 0.55, 1.30,  0.86,  0.51},
+	{0.22, 0.31, 0.83, -0.42,  0.91},
+	{0.11, 1.15, 2.10,  0.62, -0.78},
+};
 #define SIM_CHOP_RATE   0.35
 #define SIM_CHOP_AMP    0.0009
 #define SIM_DRAG        0.90
@@ -681,7 +684,8 @@ static void sim_velocities(void)
 }
 
 // vsea_sim_step(dt, blasts, nb, hulls, nh): one ocean step.
-// blasts pack (x, z, r, power); hulls pack (x, z, r, push, swirl).
+// blasts pack (x, z, r, power); hulls pack (x, z, r, push, swirl, hx, hz)
+// where (hx, hz) is the hull's heading.
 // The order matches voxel.ocean/step-ocean exactly: couplings, ambient
 // forcing, the field solve, then advection and the vertical oscillator.
 void vsea_sim_step(double dt, const double *blasts, int64_t nb,
@@ -705,11 +709,12 @@ void vsea_sim_step(double dt, const double *blasts, int64_t nb,
 		}
 	}
 	for (int64_t hh = 0; hh < nh; hh++) {
-		double hx = hulls[hh * 5], hz = hulls[hh * 5 + 1];
-		double hr = hulls[hh * 5 + 2];
-		double push = hulls[hh * 5 + 3], swirl = hulls[hh * 5 + 4];
+		const double *h = hulls + hh * 7;
+		double cx = h[0], cz = h[1], hr = h[2];
+		double push = h[3], swirl = h[4];
+		double bx = h[5], bz = h[6];   // heading: signs the wake's swirl
 		for (int i = 0; i < n; i++) {
-			double dx = sim.x[i] - hx, dz = sim.z[i] - hz;
+			double dx = sim.x[i] - cx, dz = sim.z[i] - cz;
 			double d = sqrt(dx * dx + dz * dz);
 			if (d >= hr)
 				continue;
@@ -719,16 +724,20 @@ void vsea_sim_step(double dt, const double *blasts, int64_t nb,
 			sim.vx[i] += push * w * nx;
 			sim.vz[i] += push * w * nz;
 			sim.vy[i] += 0.15 * push * w;
-			sim.om[i] += swirl * w * (nz - nx);
+			sim.om[i] += swirl * w * (bx * nz - bz * nx);
 		}
 	}
 	if (sim.ambient) {
-		double kx = SIM_SWELL_K * SIM_SWELL_DIRX;
-		double kz = SIM_SWELL_K * SIM_SWELL_DIRZ;
 		int64_t kb = (int64_t)(sim.t / SIM_CHOP_RATE);
 		for (int i = 0; i < n; i++) {
-			double ph = kx * sim.x[i] + kz * sim.z[i] - SIM_SWELL_W * sim.t;
-			sim.vy[i] += SIM_SWELL_AMP * dt * sin(ph);
+			double lift = 0.0;
+			for (int w = 0; w < SIM_SWELL_TRAINS; w++) {
+				const double *tr = sim_swell[w];
+				lift += tr[0] * dt
+				      * sin(tr[1] * (tr[3] * sim.x[i] + tr[4] * sim.z[i])
+				            - tr[2] * sim.t);
+			}
+			sim.vy[i] += lift;
 			sim.om[i] += SIM_CHOP_AMP * dt
 			           * sim_chop_rand(sim.x[i], sim.z[i], kb);
 		}
