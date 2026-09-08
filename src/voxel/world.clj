@@ -18,6 +18,7 @@
   and splash (spray + swirl), so the sea is a first-class combatant rather
   than scenery."
   (:require [voxel.buoyancy :as buoy]
+            [voxel.camera :as cam]
             [voxel.ship :as ship]
             [voxel.ocean :as sea]))
 
@@ -55,18 +56,17 @@
      :cooldown 0.0
      :sunk false}))
 
-(def SEA-EXTENT 48.0)   ; the simulated sheet spans [-EXTENT, EXTENT]^2
-(def SEA-SPACING 1.5)  ; one particle per SPAcing-unit tile
-(def SEA-COLS (int (inc (* 2.0 (/ SEA-EXTENT SEA-SPACING)))))
-
-(defn- calm-sea
-  "A still ocean sheet: one particle per tile across the whole arena, out
-  past both fleets and the gun range - the sea is one continuous particle
-  system, not a patch in the middle."
-  []
-  (for [x (range (- SEA-EXTENT) (+ SEA-EXTENT 0.01) SEA-SPACING)
-        z (range (- SEA-EXTENT) (+ SEA-EXTENT 0.01) SEA-SPACING)]
-    {:x x :z z :omega 0.0}))
+;; The sheet is sized from the camera, not from the arena: it has to run
+;; past every corner of the frame or the player sees the water end. Change
+;; the vantage and voxel.camera moves this with it.
+(def SEA-EXTENT (cam/sea-extent))
+(def SEA-TARGET-SPACING 2.0)   ; one particle per tile, roughly this wide
+(def SEA-COLS
+  (int (inc (Math/round (/ (* 2.0 SEA-EXTENT) SEA-TARGET-SPACING)))))
+(def SEA-SPACING (/ (* 2.0 SEA-EXTENT) (dec (double SEA-COLS))))
+;; a few units of open water past the sheet so particles can drift before
+;; the domain wall reflects them
+(def SEA-BOUNDS (+ SEA-EXTENT 4.0))
 
 (defn initial-state
   []
@@ -75,7 +75,7 @@
            :enemy (assoc (make-ship :enemy (ship/dreadnought) ENEMY-POS Math/PI)
                          :ai true)}
    :shells []
-   :ocean (sea/make-ocean (calm-sea))
+   :ocean (sea/make-sea SEA-COLS SEA-EXTENT SEA-BOUNDS)
    :time 0.0
    :events []})
 

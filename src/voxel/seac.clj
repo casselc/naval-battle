@@ -20,10 +20,9 @@
 (ffi/defcfn fmm* "vsea_fmm"
   [:pointer :pointer :pointer :int64 :int64 :double :pointer :pointer] :void)
 
-(ffi/defcfn mesh-init* "vsea_mesh_init" [:int :int :double :double] :void)
+(ffi/defcfn mesh-init* "vsea_mesh_init" [] :void)
 (ffi/defcfn mesh-update* "vsea_mesh_update"
-  [:pointer :pointer :pointer :pointer :int64 :double
-   :pointer :pointer :pointer :pointer :pointer] :void)
+  [:pointer :pointer :pointer :pointer] :void)
 (ffi/defcfn mesh-draw* "vsea_mesh_draw" [] :void)
 (ffi/defcfn mesh-free* "vsea_mesh_free" [] :void)
 (ffi/defcfn mesh-vertex-count* "vsea_mesh_vertex_count" [] :int64)
@@ -46,64 +45,48 @@
     (ffi/write buf :uint8 (bit-and 0xFF (bit-shift-right packed (* 8 k))) k)))
 
 (def ^:private mesh-bufs
-  "Sheet-mesh scratch: {:cap :ys :om :sun :half :deep :swell :foam}."
+  "Sheet-mesh scratch: the lighting directions and base colours. The vertex
+  data never crosses the boundary at all - C fills the mesh straight from
+  the particle arrays it already owns."
   (atom nil))
 
 (defn- ensure-mesh-buffers!
-  [n]
-  (when (or (nil? @mesh-bufs) (> n (:cap @mesh-bufs)))
-    (reset! mesh-bufs {:cap (max n 4096)
-                       :ys (ffi/alloc (* 8 (max n 4096)))
-                       :xs (ffi/alloc (* 8 (max n 4096)))
-                       :zs (ffi/alloc (* 8 (max n 4096)))
-                       :om (ffi/alloc (* 8 (max n 4096)))
-                       :sun (ffi/alloc 24)
+  []
+  (when (nil? @mesh-bufs)
+    (reset! mesh-bufs {:sun (ffi/alloc 24)
                        :half (ffi/alloc 24)
-                       :deep (ffi/alloc 4)
                        :swell (ffi/alloc 4)
                        :foam (ffi/alloc 4)})))
 
+(defn mesh-vertex-count [] (mesh-vertex-count*))
+
 (defn mesh-init!
-  "Build the sheet mesh for a cols x rows particle lattice with the given
-  tile spacing and square extent."
-  [cols rows spacing extent]
-  (mesh-init* (int cols) (int rows) (double spacing) (double extent)))
+  "Build the sheet mesh over the live particle sim: one vertex per particle."
+  []
+  (mesh-init*))
 
 (defn mesh-update!
-  "Refill and upload the sheet mesh from per-particle spray heights and
-  vorticities. sun/half are the lighting directions (3-vectors), and
-  deep/swell/foam the packed base colors."
-  [ps t sun half deep swell foam]
-  (ensure-mesh-buffers! (count ps))
-  (let [b @mesh-bufs
-        ys (:ys b)
-        xs (:xs b)
-        zs (:zs b)
-        om (:om b)
-        sunb (:sun b)
-        halfb (:half b)
-        deepb (:deep b)
-        swellb (:swell b)
-        foamb (:foam b)]
-    (dotimes [i (count ps)]
-      (let [p (nth ps i)]
-        (ffi/write ys :double (double (or (:y p) 0.0)) (* 8 i))
-        (ffi/write xs :double (double (or (:x p) 0.0)) (* 8 i))
-        (ffi/write zs :double (double (or (:z p) 0.0)) (* 8 i))
-        (ffi/write om :double (double (or (:omega p) 0.0)) (* 8 i))))
+  "Refill and upload the sheet from the live particle state. sun/half are the
+  lighting directions (3-vectors), swell/foam the packed base colours."
+  [sun half swell foam]
+  (ensure-mesh-buffers!)
+  (let [b @mesh-bufs]
     (dotimes [k 3]
-      (ffi/write sunb :double (double (nth sun k)) (* 8 k))
-      (ffi/write halfb :double (double (nth half k)) (* 8 k)))
-    (write-color! deepb deep)
-    (write-color! swellb swell)
-    (write-color! foamb foam)
-    (mesh-update* ys xs zs om (long (count ps)) (double t)
-                  sunb halfb deepb swellb foamb)))
+      (ffi/write (:sun b) :double (double (nth sun k)) (* 8 k))
+      (ffi/write (:half b) :double (double (nth half k)) (* 8 k)))
+    (write-color! (:swell b) swell)
+    (write-color! (:foam b) foam)
+    (mesh-update* (:sun b) (:half b) (:swell b) (:foam b))))
 
 (defn mesh-draw!
   "One draw call for the whole sheet, identity transform."
   []
   (mesh-draw*))
+
+(defn mesh-free!
+  "Release the sheet mesh."
+  []
+  (mesh-free*))
 
 (ffi/defcfn ship-init* "vsea_ship_init" [:pointer :pointer :int64] :int64)
 (ffi/defcfn ship-draw* "vsea_ship_draw"
@@ -176,6 +159,114 @@
 (defn ship-free!
   [id]
   (ship-free* (long id)))
+
+(ffi/defcfn sim-init* "vsea_sim_init"
+  [:int :double :double :int :double :int] :void)
+(ffi/defcfn sim-free* "vsea_sim_free" [] :void)
+(ffi/defcfn sim-count* "vsea_sim_count" [] :int64)
+(ffi/defcfn sim-cols* "vsea_sim_cols" [] :int64)
+(ffi/defcfn sim-spacing* "vsea_sim_spacing" [] :double)
+(ffi/defcfn sim-extent* "vsea_sim_extent" [] :double)
+(ffi/defcfn sim-time* "vsea_sim_time" [] :double)
+(ffi/defcfn sim-circulation* "vsea_sim_circulation" [] :double)
+(ffi/defcfn sim-step* "vsea_sim_step"
+  [:double :pointer :int64 :pointer :int64] :void)
+(ffi/defcfn sim-load* "vsea_sim_load"
+  [:pointer :pointer :pointer :pointer :pointer :pointer :pointer
+   :int64 :double] :void)
+(ffi/defcfn sim-read* "vsea_sim_read"
+  [:pointer :pointer :pointer :pointer :pointer :pointer :pointer] :void)
+
+(def ^:private sim-bufs
+  "Scratch for the sim boundary: seven state columns plus the coupling
+  packs. Allocated once and reused - the frame loop is single-threaded, and
+  nothing here is on the per-particle hot path anyway."
+  (atom nil))
+
+(defn- ensure-sim-buffers!
+  [n]
+  (when (or (nil? @sim-bufs) (> n (:cap @sim-bufs)))
+    (let [cap (max n 4096)]
+      (reset! sim-bufs
+              (into {:cap cap
+                     :blasts (ffi/alloc (* 8 4 64))
+                     :hulls (ffi/alloc (* 8 5 64))}
+                    (map (fn [k] [k (ffi/alloc (* 8 cap))]))
+                    [:x :z :y :vx :vy :vz :om])))))
+
+(def ^:private SIM-COLS [:x :z :y :vx :vy :vz :om])
+
+(defn sim-init!
+  "Lay out a still cols x cols particle sheet covering [-extent, extent]^2,
+  reflecting at +/- bounds. Returns the particle count."
+  [cols extent bounds ambient? viscosity sparse-max]
+  (sim-init* (int cols) (double extent) (double bounds)
+             (int (if ambient? 1 0)) (double viscosity) (int sparse-max))
+  (ensure-sim-buffers! (max 1 (sim-count*)))
+  (sim-count*))
+
+(defn sim-free! [] (sim-free*))
+(defn sim-count [] (sim-count*))
+(defn sim-cols [] (sim-cols*))
+(defn sim-spacing [] (sim-spacing*))
+(defn sim-extent [] (sim-extent*))
+(defn sim-time [] (sim-time*))
+(defn sim-circulation [] (sim-circulation*))
+
+(def ^:private MAX-COUPLINGS 64)
+
+(defn- write-pack!
+  "Pack maps into a flat double buffer, ks fields each, capped."
+  [buf items ks]
+  (let [items (vec (take MAX-COUPLINGS items))
+        w (count ks)]
+    (dotimes [i (count items)]
+      (let [m (nth items i)]
+        (dotimes [f w]
+          (ffi/write buf :double (double (or (get m (nth ks f)) 0.0))
+                     (* 8 (+ (* i w) f))))))
+    (count items)))
+
+(defn sim-step!
+  "Advance the native ocean dt seconds under this frame's couplings.
+  blasts are {:x :z :r :power}, hulls {:x :z :r :push :swirl}."
+  [dt blasts hulls]
+  (let [b @sim-bufs
+        nb (write-pack! (:blasts b) blasts [:x :z :r :power])
+        nh (write-pack! (:hulls b) hulls [:x :z :r :push :swirl])]
+    (sim-step* (double dt) (:blasts b) (long nb) (:hulls b) (long nh))))
+
+(defn sim-particles
+  "The native particle state as ocean-shaped maps. Off the hot path - the
+  renderer reads the same arrays inside C - so this is for tests, the REPL
+  and anything that wants the pure representation back."
+  []
+  (let [n (sim-count*)]
+    (if (zero? n)
+      []
+      (let [b @sim-bufs
+            cols (mapv #(get b %) SIM-COLS)]
+        (apply sim-read* cols)
+        (mapv (fn [i]
+                (let [g (fn [c] (ffi/read c :double (* 8 i)))]
+                  {:x (g (cols 0)) :z (g (cols 1)) :y (g (cols 2))
+                   :vx (g (cols 3)) :vy (g (cols 4)) :vz (g (cols 5))
+                   :omega (g (cols 6))}))
+              (range n))))))
+
+(defn sim-load!
+  "Overwrite the native particle state from ocean-shaped maps. Tests use
+  this to put the C sim and the pure reference on identical footing."
+  [ps t]
+  (let [b @sim-bufs
+        cols (mapv #(get b %) SIM-COLS)
+        ks [:x :z :y :vx :vy :vz :omega]]
+    (dotimes [i (count ps)]
+      (let [p (nth ps i)]
+        (dotimes [f 7]
+          (ffi/write (cols f) :double (double (or (get p (nth ks f)) 0.0))
+                     (* 8 i)))))
+    (apply sim-load* (conj cols (long (count ps)) (double t)))))
 
 ;; --- headless inspection -----------------------------------------------------
 ;;

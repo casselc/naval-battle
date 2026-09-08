@@ -53,6 +53,17 @@
             (fn [oc] (seac/fmm (:particles oc)
                                (or (:p oc) 10) (:bounds oc))))
     (catch Exception _ nil))
+  ;; the native particle sim: the whole ocean state in flat C arrays, so no
+  ;; particle crosses the FFI boundary in the frame loop
+  (try
+    (seac/sim-init! 4 1.0 2.0 false 0.0 2048)
+    (seac/sim-free!)
+    (reset! ocean/sim-kernel
+            {:init! seac/sim-init!
+             :step! seac/sim-step!
+             :particles seac/sim-particles
+             :time seac/sim-time})
+    (catch Exception _ nil))
   (let [wrld (b3/create-world 0.0 (- w/GRAVITY) 0.0 1)]
     (vreset! world* wrld)
     (vreset! ball* nil)

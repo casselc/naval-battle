@@ -2,18 +2,17 @@
   "Raylib draw calls ONLY. Draws a naval battle state (voxel.world) - two
   warships on the particle ocean, shells in flight, the aim arc - plus the
   HUD overlay. No game logic here."
-  (:require [voxel.raylib :as rl]
+  (:require [voxel.camera :as cam]
+            [voxel.raylib :as rl]
             [voxel.seac :as seac]
             [voxel.world :as w]))
 
-
-;; RTS vantage: a high isometric orthographic look over the whole arena -
-;; 45-degree azimuth, ~35-degree elevation - so both fleets and the sea
-;; between them read like a battle map
-(def CAMERA-POS [-60.0 62.0 -60.0])
-(def CAMERA-TARGET [0.0 0.0 0.0])
-(def FOVY 110.0)          ; orthographic: vertical world-units in view
-(def CAMERA-ORTHO 1)      ; raylib projection: 1 = CAMERA_ORTHOGRAPHIC
+;; the vantage itself lives in voxel.camera, which is pure - the ocean sizes
+;; itself from the same numbers so the water always runs past the frame
+(def CAMERA-POS cam/POS)
+(def CAMERA-TARGET cam/TARGET)
+(def FOVY cam/FOVY)
+(def CAMERA-ORTHO cam/ORTHO)
 
 (def MAT-COLORS
   {:hull (rl/rgba 72 94 112 255)       ; steel grey-blue
@@ -21,7 +20,6 @@
    :super (rl/rgba 152 158 168 255)    ; superstructure
    :gun (rl/rgba 58 60 68 255)})       ; turret dark
 
-(def DEEP (rl/rgba 16 58 96 255))
 (def SWELL (rl/rgba 30 96 138 255))
 (def FOAM (rl/rgba 208 232 240 255))
 
@@ -100,18 +98,22 @@
       (seac/ship-draw! mid (:pos ship) (:quat ship) (:anchor ship)
                        SUN-L CAMERA-POS))))
 
+;; defonce so an ns reload keeps the C mesh rather than leaking it
 (defonce sea-mesh-ready? (volatile! false))
 
 (defn- draw-sea!
-  "The whole ocean as ONE mesh built and drawn in C: the particle sheet at
-  full SPAcing-unit resolution, the same swell continuing to the horizon,
-  per-corner sun shading - one buffer upload and one draw call. Issuing the
-  same sheet per-vertex from jolt cost 40ms of frame time."
-  [ocean t]
-  (when-not @sea-mesh-ready?
-    (seac/mesh-init! w/SEA-COLS w/SEA-COLS w/SEA-SPACING w/SEA-EXTENT)
+  "The whole ocean as ONE mesh built and drawn in C, one vertex per particle:
+  the surface a player sees is the particle heights and nothing else. No
+  vertex data crosses the FFI boundary - C fills the mesh from the same
+  arrays the sim steps."
+  []
+  ;; a restart re-lays the sim, so rebuild whenever the sheet no longer
+  ;; matches the particle set rather than quietly drawing a stale one
+  (when (or (not @sea-mesh-ready?)
+            (not= (seac/mesh-vertex-count) (seac/sim-count)))
+    (seac/mesh-init!)
     (vreset! sea-mesh-ready? true))
-  (seac/mesh-update! (:particles ocean) t SUN-L HALF-VIEW DEEP SWELL FOAM)
+  (seac/mesh-update! SUN-L HALF-VIEW SWELL FOAM)
   (seac/mesh-draw!))
 
 (def ^:private SHADOW-ALPHA 96)
@@ -226,9 +228,8 @@
                       :target-z (CAMERA-TARGET 2)
                        :fovy FOVY :projection CAMERA-ORTHO}
     (fn []
-      (let [t (or (:time world) 0.0)]
-        (draw-sea! (:ocean world) t)
-        (draw-shadows! (:ships world)))
+      (draw-sea!)
+      (draw-shadows! (:ships world))
       (doseq [[id ship] (:ships world)]
         (draw-ship! id ship))
       (draw-shells! (:shells world))

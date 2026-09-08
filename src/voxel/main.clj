@@ -1,13 +1,14 @@
 (ns voxel.main
   "Window setup + the frame loop: input -> physics facts -> world -> render."
-  (:require [voxel.raylib :as rl]
+  (:require [voxel.camera :as cam]
+            [voxel.raylib :as rl]
             [voxel.input :as input]
             [voxel.world :as w]
             [voxel.physics :as phys]
             [voxel.render :as render]))
 
-(def WIDTH 960)
-(def HEIGHT 540)
+(def WIDTH cam/WIDTH)
+(def HEIGHT cam/HEIGHT)
 (def MAX-DEBRIS 240)
 (def EXPLOSION-STRENGTH 0.35)
 

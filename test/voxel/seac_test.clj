@@ -110,25 +110,59 @@
             (is (every? (fn [[_ c]] (= 255 (c 3))) lit)
                 "alpha stays opaque whatever the sun angle")))))))
 
-(defn- sea-particles
-  "A small still sheet: one particle per tile of a cols x cols lattice."
-  [cols spacing extent]
-  (vec (for [i (range cols)
-             j (range cols)]
-         {:x (+ (- extent) (* i spacing))
-          :z (+ (- extent) (* j spacing))
-          :y 0.0 :omega 0.0})))
+(defn- with-sheet
+  "A live native sim plus its mesh, torn down after f."
+  [cols extent f]
+  (seac/sim-init! cols extent (+ extent 4.0) true 0.04 2048)
+  (seac/mesh-init!)
+  (try (f) (finally (seac/mesh-free!) (seac/sim-free!))))
 
 (deftest sea-shading-leaves-alpha-alone
   (testing "shaded water stays opaque - the sky must not show through troughs"
-    (let [cols 8 spacing 1.5 extent 6.0]
-      (seac/mesh-init! cols cols spacing extent)
-      (seac/mesh-update! (sea-particles cols spacing extent) 0.0
-                         SUN [0.0 1.0 0.0] render/DEEP render/SWELL render/FOAM)
-      (let [[_ _ colors] (seac/mesh-buffers)]
-        (is (pos? (count colors)))
-        (is (every? #(= 255 (% 3)) colors)
-            "every sea vertex is fully opaque")))))
+    (with-sheet 8 6.0
+      (fn []
+        (seac/mesh-update! SUN [0.0 1.0 0.0] render/SWELL render/FOAM)
+        (let [[_ _ colors] (seac/mesh-buffers)]
+          (is (pos? (count colors)))
+          (is (every? #(= 255 (% 3)) colors)
+              "every sea vertex is fully opaque"))))))
+
+;; --- the sheet is the particle set ------------------------------------------
+
+(deftest the-sheet-is-one-vertex-per-particle
+  (testing "no interpolated corner lattice, no analytic ring: the drawn
+            surface is exactly the simulated particles"
+    (with-sheet 12 10.0
+      (fn []
+        (seac/mesh-update! SUN [0.0 1.0 0.0] render/SWELL render/FOAM)
+        (let [[verts _ _] (seac/mesh-buffers)
+              ps (seac/sim-particles)]
+          (is (= (count ps) (count verts)))
+          (is (= 144 (count verts)) "12 x 12 lattice")
+          (doseq [i (range (count ps))]
+            (let [p (nth ps i)
+                  [x y z] (nth verts i)]
+              (is (< (Math/abs (- x (:x p))) 1e-6) "vertex x is the particle's")
+              (is (< (Math/abs (- z (:z p))) 1e-6) "vertex z is the particle's")
+              ;; the sheet rides a hair above y so it clears the shadow quads
+              (is (< (Math/abs (- y (+ (:y p) 0.05))) 1e-6)
+                  "vertex height is the particle's height and nothing else"))))))))
+
+(deftest the-sheet-height-follows-the-particles
+  (testing "a still sea is flat; the height a player sees comes from the sim"
+    (with-sheet 10 8.0
+      (fn []
+        (seac/mesh-update! SUN [0.0 1.0 0.0] render/SWELL render/FOAM)
+        (let [[flat _ _] (seac/mesh-buffers)]
+          (is (every? #(< (Math/abs (- (second %) 0.05)) 1e-9) flat)
+              "nothing analytic is added to a sea at rest")
+          ;; a blast throws water up; the sheet must rise with it
+          (seac/sim-step! 0.016 [{:x 0.0 :z 0.0 :r 6.0 :power 9.0}] nil)
+          (seac/mesh-update! SUN [0.0 1.0 0.0] render/SWELL render/FOAM)
+          (let [[bumped _ _] (seac/mesh-buffers)]
+            (is (> (apply max (map second bumped))
+                   (+ 0.05 (apply max (map second flat))))
+                "the blast shows in the drawn surface")))))))
 
 ;; --- shadow footprint ------------------------------------------------------
 

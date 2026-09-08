@@ -1,6 +1,7 @@
 (ns voxel.ocean-test
   (:require [clojure.test :refer [deftest is testing]]
-            [voxel.ocean :as sea]))
+            [voxel.ocean :as sea]
+            [voxel.seac :as seac]))
 
 (def ^:private near (fn [x y tol] (< (Math/abs (- (double x) (double y))) tol)))
 
@@ -195,8 +196,10 @@
     (let [oc (random-cloud (inc sea/DIRECT-MAX) 9)]
       (is (= (sea/fmm-velocities oc) (sea/velocities oc))))))
 
-(deftest small-seas-sum-directly
-  (testing "at or under DIRECT-MAX particles the field is the direct Biot-Savart sum"
+(deftest sparse-sums-are-the-direct-sums-in-range
+  (testing "under SPARSE-MAX actives the field is the exact Biot-Savart sum"
+    ;; the cloud spans [-1,1], well inside FIELD-RADIUS, so the truncated
+    ;; sparse sum and the untruncated direct sum must agree exactly
     (let [oc (random-cloud sea/DIRECT-MAX 7)]
       (is (= (sea/direct-velocities oc) (sea/velocities oc))))))
 
@@ -228,3 +231,105 @@
                           oc (range 300))]
       (is (< (apply max (map #(Math/abs (:omega %)) (:particles stepped))) 0.05)
           "ambient chop, not a maelstrom"))))
+
+
+;; --- the native sim is the pure model, in flat arrays ------------------------
+;;
+;; The particle state lives in C so the frame loop never touches a particle
+;; across the FFI boundary. voxel.ocean stays the readable definition of what
+;; the ocean IS, and these hold the kernel to it step for step - if the two
+;; ever drift, the reference stops describing the game.
+
+(defn- native-sheet
+  "A native sim seeded from ps, plus the equivalent pure ocean."
+  [cols extent bounds ps ambient? sparse-max]
+  (seac/sim-init! cols extent bounds ambient? sea/VISCOSITY sparse-max)
+  (seac/sim-load! ps 0.0)
+  [(assoc (sea/make-ocean ps) :bounds bounds :ambient ambient?
+          :viscosity sea/VISCOSITY)])
+
+(defn- max-drift
+  [a b]
+  (apply max 0.0
+         (mapcat (fn [p q]
+                   (map (fn [k] (Math/abs (- (double (or (k p) 0.0))
+                                             (double (or (k q) 0.0)))))
+                        [:x :z :y :vx :vy :vz :omega]))
+                 a b)))
+
+(deftest native-sim-tracks-the-pure-ocean
+  (testing "a churning sea steps identically in C and in Clojure"
+    (let [cols 24
+          extent 20.0
+          bounds 24.0
+          r (lcg 4242)
+          u (fn [lo hi] (+ lo (* (- hi lo) (/ (rem (r) 1000000) 1000000.0))))
+          ;; seed the lattice itself, so both sides start from one state
+          ps (vec (for [i (range cols) j (range cols)]
+                    {:x (+ (- extent) (* i (/ (* 2.0 extent) (dec cols))))
+                     :z (+ (- extent) (* j (/ (* 2.0 extent) (dec cols))))
+                     :y 0.0 :vx 0.0 :vy 0.0 :vz 0.0
+                     :omega (u -1.5 1.5)}))
+          [pure0] (native-sheet cols extent bounds ps true sea/SPARSE-MAX)
+          blasts [{:x 2.0 :z -3.0 :r 4.0 :power 6.0}]
+          hulls [{:x -5.0 :z 1.0 :r 5.0 :push 0.8 :swirl 0.4}]]
+      (loop [k 0 pure pure0]
+        (when (< k 6)
+          ;; couplings on the first step only, then free evolution
+          (let [bl (when (zero? k) blasts)
+                hl (when (zero? k) hulls)
+                pure' (sea/step-ocean pure 0.016 bl hl)]
+            (seac/sim-step! 0.016 bl hl)
+            (let [d (max-drift (:particles pure') (seac/sim-particles))]
+              (is (< d 1e-9) (str "step " k " drift " d)))
+            (is (< (Math/abs (- (seac/sim-time) (:time pure'))) 1e-12))
+            (recur (inc k) pure'))))
+      (seac/sim-free!))))
+
+(deftest native-sim-lays-out-a-full-sheet
+  (testing "the sheet covers the requested extent, one particle per tile"
+    (let [n (seac/sim-init! 33 48.0 58.0 true sea/VISCOSITY sea/SPARSE-MAX)
+          ps (seac/sim-particles)
+          xs (map :x ps)]
+      (is (= (* 33 33) n))
+      (is (= 33 (seac/sim-cols)))
+      (is (< (Math/abs (- (seac/sim-spacing) (/ 96.0 32.0))) 1e-12))
+      (is (< (Math/abs (+ (apply min xs) 48.0)) 1e-9) "starts at -extent")
+      (is (< (Math/abs (- (apply max xs) 48.0)) 1e-9) "ends at +extent")
+      (seac/sim-free!))))
+
+(deftest native-still-water-stays-put
+  (testing "a becalmed native sea steps without moving a particle"
+    (seac/sim-init! 20 20.0 24.0 false 0.0 sea/SPARSE-MAX)
+    (let [before (seac/sim-particles)]
+      (seac/sim-step! 0.05 nil nil)
+      (is (= before (seac/sim-particles)))
+      (seac/sim-free!))))
+
+(deftest native-sim-fmm-branch-tracks-the-pure-ocean
+  (testing "past the sparse ceiling both sides switch to the FMM together"
+    ;; sparse-max 0 forces the multipole path on a sheet small enough for the
+    ;; pure reference to step in reasonable time
+    (let [cols 16
+          extent 14.0
+          bounds 18.0
+          r (lcg 77)
+          u (fn [lo hi] (+ lo (* (- hi lo) (/ (rem (r) 1000000) 1000000.0))))
+          sp (/ (* 2.0 extent) (dec cols))
+          ps (vec (for [i (range cols) j (range cols)]
+                    {:x (+ (- extent) (* i sp)) :z (+ (- extent) (* j sp))
+                     :y 0.0 :vx 0.0 :vy 0.0 :vz 0.0 :omega (u -1.0 1.0)}))
+          [pure0] (native-sheet cols extent bounds ps false 0)
+          pure0 (assoc pure0 :ambient false)]
+      (is (> (count (filter #(> (Math/abs (:omega %)) sea/ACTIVE-EPS) ps)) 0))
+      ;; the pure side needs the same ceiling, or it takes the sparse path
+      ;; and the comparison is between two different algorithms
+      (with-redefs [sea/SPARSE-MAX 0]
+        (loop [k 0 pure pure0]
+          (when (< k 3)
+            (let [pure' (sea/step-ocean pure 0.016 nil nil)]
+              (seac/sim-step! 0.016 nil nil)
+              (let [d (max-drift (:particles pure') (seac/sim-particles))]
+                (is (< d 1e-9) (str "fmm step " k " drift " d)))
+              (recur (inc k) pure')))))
+      (seac/sim-free!))))

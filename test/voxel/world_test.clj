@@ -170,15 +170,19 @@
         (str "fleets start half again beyond the " gun-range
              "-unit gun range - a proper sail-in, not a knife fight"))))
 
-(deftest the-sea-is-a-bigger-ocean-now
-  (let [ps (get-in (w/initial-state) [:ocean :particles])
+(deftest the-sea-runs-past-the-frame
+  (let [oc (:ocean (w/initial-state))
+        ps (sea/particles oc)
         xs (map #(Math/abs (:x %)) ps)
         zs (map #(Math/abs (:z %)) ps)]
-    (is (>= (count ps) 4000) "65x65 lattice across the widened arena")
+    (is (= (* w/SEA-COLS w/SEA-COLS) (count ps))
+        "one particle per tile across the whole sheet")
     (is (>= (apply max xs) (- w/SEA-EXTENT 0.1))
         "the sheet reaches the full declared extent")
-    (is (every? #(<= % sea/BOUNDS) (concat xs zs))
-        "no particle starts outside the ocean domain")))
+    (is (every? #(<= % w/SEA-BOUNDS) (concat xs zs))
+        "no particle starts outside the ocean domain")
+    (is (< (Math/abs (- w/SEA-SPACING w/SEA-TARGET-SPACING)) 0.2)
+        "tiles come out near the target spacing")))
 
 (deftest enemy-closes-when-out-of-range
   (let [far (assoc-in (w/initial-state) [:ships :player :pos] [0.0 -3.0 -30.0])

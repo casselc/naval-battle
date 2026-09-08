@@ -37,6 +37,15 @@
 (def VISCOSITY 0.04)
 (def SPRAY-G 20.0)
 
+;; how the velocity field is evaluated at a given sea state
+(def ACTIVE-EPS 1e-9)   ; vorticity at or below this is still water
+(def FIELD-RADIUS 14.0) ; the exact field reaches this far from any vortex
+(def SPARSE-MAX 2048)   ; actives up to this get exact sums; past it the FMM.
+                        ; The ambient sea is fully active (every particle
+                        ; carries gentle chop), so the live ocean rides the
+                        ; FMM, which is the point of the fast algorithm.
+(def DIRECT-MAX 220)    ; oracle only: direct-velocities is the test reference
+
 ;; ambient sea state: a travelling swell and slow turbulence eddies keep
 ;; the open water alive between battles. Both are deterministic functions
 ;; of (x, z, t), so every run - live or headless - shows the same sea.
@@ -107,25 +116,70 @@
 ;; --- ocean state -------------------------------------------------------------------
 
 (defn make-ocean
-  "Ocean from particle specs ({:x :z :omega ...} with defaults). :bounds is
+  "Ocean from particle specs ({:x :z :omega ...} with defaults). bounds is
   the reflecting domain half-width; positions clamp into it so every particle
   lives inside the FMM domain (the sea is a bounded arena)."
-  [specs]
-  {:particles (mapv (fn [s]
-                      (let [p (merge {:x 0.0 :y 0.0 :z 0.0 :vx 0.0 :vy 0.0 :vz 0.0
-                                      :omega 0.0}
-                                     s)
-                            cl (fn [v] (max (- BOUNDS) (min BOUNDS v)))]
-                        (assoc p :x (cl (:x p)) :z (cl (:z p)))))
-                    specs)
-   :bounds BOUNDS
-   :viscosity VISCOSITY
-   :ambient true
-   :p EXPANSION-P})
+  ([specs] (make-ocean specs BOUNDS))
+  ([specs bounds]
+   {:particles (mapv (fn [s]
+                       (let [p (merge {:x 0.0 :y 0.0 :z 0.0
+                                       :vx 0.0 :vy 0.0 :vz 0.0 :omega 0.0}
+                                      s)
+                             cl (fn [v] (max (- bounds) (min bounds v)))]
+                         (assoc p :x (cl (:x p)) :z (cl (:z p)))))
+                     specs)
+    :bounds bounds
+    :viscosity VISCOSITY
+    :ambient true
+    :p EXPANSION-P}))
+
+(def sim-kernel
+  "The native particle sim (voxel.seac), wired by voxel.physics/init! when
+  the C library loads. A map of
+  {:init! (fn [cols extent bounds ambient? viscosity sparse-max])
+   :step! (fn [dt blasts hulls]) :particles (fn []) :time (fn [])}.
+
+  When it is present the game's particle state lives in flat native arrays
+  and never crosses the FFI boundary per particle; the pure model in this
+  namespace stays the definition of what the ocean is, and ocean-test holds
+  the kernel to it step for step. With no kernel wired - tests, tooling -
+  everything below runs in Clojure and behaves the same, only slower."
+  (atom nil))
+
+(defn lattice
+  "The still particle sheet the sim lays out: cols x cols particles evenly
+  covering [-extent, extent]^2, one per tile. Same layout as the C sim, so
+  the pure fallback and the native path start from identical water."
+  [cols extent]
+  (let [sp (/ (* 2.0 extent) (dec (double cols)))]
+    (vec (for [i (range cols)
+               j (range cols)]
+           {:x (+ (- extent) (* i sp)) :z (+ (- extent) (* j sp))
+            :omega 0.0}))))
+
+(defn make-sea
+  "The game's ocean over [-extent, extent]^2, reflecting at +/- bounds:
+  native when the sim kernel is wired, the pure model otherwise. Both step
+  through step-ocean and are read through `particles`."
+  [cols extent bounds]
+  (if-let [k @sim-kernel]
+    (do ((:init! k) cols extent bounds true VISCOSITY SPARSE-MAX)
+        {:native true :cols cols :extent extent :bounds bounds
+         :ambient true :viscosity VISCOSITY :p EXPANSION-P :time 0.0})
+    (-> (make-ocean (lattice cols extent) bounds)
+        (assoc :extent extent :cols cols))))
+
+(defn particles
+  "The ocean's particles as maps, whichever side they live on. Off the hot
+  path: the renderer's mesh is filled inside C from the same arrays."
+  [oc]
+  (if (:native oc)
+    ((:particles @sim-kernel))
+    (:particles oc)))
 
 (defn total-circulation
   [oc]
-  (reduce + (map :omega (:particles oc))))
+  (reduce + (map :omega (particles oc))))
 
 ;; --- the field: direct summation (oracle + FMM near-field) -------------------------
 
@@ -510,14 +564,6 @@
                                  (* SURFACE-C (:vy p)))))]
       (assoc p :y y :vy vy))))
 
-(def DIRECT-MAX 220)
-(def ACTIVE-EPS 1e-9)   ; vorticity at or below this is still water
-(def FIELD-RADIUS 14.0) ; the exact field reaches this far from any vortex
-(def SPARSE-MAX 2048)   ; actives up to this take the sparse/kernel path. The
-                         ; ambient sea is fully active (every particle carries
-                         ; gentle chop), so the live ocean rides the C FMM
-                         ; kernel past this ceiling; the pure loop is the test
-                         ; reference.
 (def ^:private BUCKET 4.0) ; sparse-field target bucket width, world units
 
 (defn- sparse-velocities
@@ -568,13 +614,15 @@
 (defn velocities
   "The velocity field however it is cheapest at this sea state:
   - a still sea: no vortices, no field, no pair sums at all;
-  - a battle (the usual case): exact sums from the actives out to
-    FIELD-RADIUS, still water beyond - the C kernel when wired, the pure
-    loop otherwise;
-  - a fully agitated small sea: the direct O(N^2) sum, exact everywhere;
-  - actives past SPARSE-MAX on a mega-scale sea: the FMM - the quadtree
-    groups the whole sea so the cost stays O(N), which is the point of
-    the fast algorithm."
+  - a scattering of live vortices: exact sums from the actives out to
+    FIELD-RADIUS, still water beyond;
+  - actives past SPARSE-MAX: the FMM, whose quadtree groups the whole sea
+    so the cost stays linear in the particle count.
+
+  direct-velocities is deliberately NOT in this dispatch - it is the O(N^2)
+  oracle the other two are tested against. (It used to sit between the two
+  branches below, where na > SPARSE-MAX >= n > DIRECT-MAX can never hold,
+  so it was unreachable.)"
   [oc]
   (let [ps (:particles oc)
         n (count ps)
@@ -584,17 +632,12 @@
       (<= na SPARSE-MAX) (if-let [k @field-kernel]
                            (k oc)
                            (sparse-velocities ps))
-      (<= n DIRECT-MAX) (direct-velocities oc)
       :else (if-let [k @fmm-kernel]
               (k oc)
               (fmm-velocities oc)))))
 
-(defn step-ocean
-  "Advance the ocean dt seconds. blasts and hulls are this frame's couplings
-  from the world (see apply-blasts / apply-hulls)."
-  ([oc dt] (step-ocean oc dt nil nil))
-  ([oc dt blasts] (step-ocean oc dt blasts nil))
-  ([oc dt blasts hulls]
+(defn- step-pure
+  [oc dt blasts hulls]
    (let [ps (-> (:particles oc)
                  (apply-blasts blasts)
                  (apply-hulls hulls)
@@ -627,4 +670,17 @@
                                      :omega (* (- 1.0 (* vis dt)) (:omega p)))]
                        (step-vertical p' dt))))
                    ps field)]
-     (assoc oc :particles ps' :time (+ (or (:time oc) 0.0) dt)))))
+     (assoc oc :particles ps' :time (+ (or (:time oc) 0.0) dt))))
+
+(defn step-ocean
+  "Advance the ocean dt seconds. blasts and hulls are this frame's couplings
+  from the world (see apply-blasts / apply-hulls). A native ocean steps
+  inside the kernel; everything below is the pure model it mirrors."
+  ([oc dt] (step-ocean oc dt nil nil))
+  ([oc dt blasts] (step-ocean oc dt blasts nil))
+  ([oc dt blasts hulls]
+   (if (:native oc)
+     (let [k @sim-kernel]
+       ((:step! k) dt blasts hulls)
+       (assoc oc :time ((:time k))))
+     (step-pure oc dt blasts hulls))))

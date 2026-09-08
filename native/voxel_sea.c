@@ -60,16 +60,20 @@ void vsea_field(const double *xs, const double *zs, const double *om,
 // 12, max depth 6, separation 2 cell widths, adaptive levels compared at
 // the coarser cell.
 
-#define FMM_MAXN 8192
+#define FMM_MAXN 65536
 #define FMM_P 10
 #define FMM_LEAF 12
 #define FMM_DEPTH 6
-#define FMM_MAXNODES (2 * FMM_MAXN + 64)
-#define FMM_MAXNBR (FMM_MAXN * 32)
+// a quadtree capped at FMM_DEPTH holds at most (4^(D+1)-1)/3 nodes however
+// many particles arrive, so the node arrays size off the depth, not off N
+#define FMM_MAXNODES 5472
+#define FMM_GRID_CELLS 5461         // sum of 4^d for d in 0..FMM_DEPTH
+#define FMM_MAXNBR (1 << 21)
 
 typedef struct {
 	double cx, cz, h;
 	int depth, parent, leaf;
+	int ix, iz;                 // cell index within its level's 2^d grid
 	int kid[4];
 	int begin, end;             // slice of forder[]
 } FmmNode;
@@ -81,6 +85,12 @@ static double fa_re[FMM_MAXNODES][FMM_P], fa_im[FMM_MAXNODES][FMM_P];
 static double fb_re[FMM_MAXNODES][FMM_P], fb_im[FMM_MAXNODES][FMM_P];
 static int flevels[FMM_DEPTH + 1][FMM_MAXNODES];
 static int flevel_n[FMM_DEPTH + 1];
+// per-level occupancy grid: fgrid[fgrid_off[d] + ix * 2^d + iz] is the node
+// id at that cell, or -1. Turns colleague and interaction-list lookup into
+// index arithmetic; scanning every same-level pair instead is O(cells^2) and
+// was the whole cost of the solve.
+static int fgrid[FMM_GRID_CELLS];
+static const int fgrid_off[FMM_DEPTH + 2] = {0, 1, 5, 21, 85, 341, 1365, 5461};
 static int fnbr[FMM_MAXNBR];
 static int fnbr_off[FMM_MAXNODES + 1];
 static int fnbr_all[FMM_MAXNODES];  // leaf flag: near field = everyone
@@ -108,12 +118,14 @@ static double fmm_clamp(double v)
 }
 
 static int fmm_split(int parent, double cx, double cz, double h,
-                     int depth, int begin, int end)
+                     int depth, int ix, int iz, int begin, int end)
 {
 	int id = fnodes_n++;
 	FmmNode *nd = &fnodes[id];
 	nd->cx = cx; nd->cz = cz; nd->h = h;
 	nd->depth = depth; nd->parent = parent;
+	nd->ix = ix; nd->iz = iz;
+	fgrid[fgrid_off[depth] + (ix << depth) + iz] = id;
 	nd->begin = begin; nd->end = end;
 	for (int q = 0; q < 4; q++)
 		nd->kid[q] = -1;
@@ -148,8 +160,9 @@ static int fmm_split(int parent, double cx, double cz, double h,
 		double h2 = 0.5 * h;
 		double sx = (q & 1) ? h2 : -h2;
 		double sz = (q >= 2) ? h2 : -h2;
-		nd->kid[q] = fmm_split(id, cx + sx, cz + sz, h2,
-		                       depth + 1, start[q], start[q] + cnt[q]);
+		nd->kid[q] = fmm_split(id, cx + sx, cz + sz, h2, depth + 1,
+		                       2 * ix + (q & 1), 2 * iz + (q >= 2),
+		                       start[q], start[q] + cnt[q]);
 	}
 	return id;
 }
@@ -258,10 +271,14 @@ static void fmm_l2l(int tid)
 	}
 }
 
-static double fmm_cheb(const FmmNode *a, const FmmNode *b)
+// The node at (ix, iz) on level d, or -1 when the tree never created it
+// (out of range, or an ancestor stopped splitting).
+static int fmm_at(int d, int ix, int iz)
 {
-	double dx = fabs(a->cx - b->cx), dz = fabs(a->cz - b->cz);
-	return dx > dz ? dx : dz;
+	int w = 1 << d;
+	if (ix < 0 || iz < 0 || ix >= w || iz >= w)
+		return -1;
+	return fgrid[fgrid_off[d] + (ix << d) + iz];
 }
 
 static const FmmNode *fmm_ancestor(const FmmNode *nd, int lvl)
@@ -269,6 +286,17 @@ static const FmmNode *fmm_ancestor(const FmmNode *nd, int lvl)
 	while (nd->depth > lvl)
 		nd = &fnodes[nd->parent];
 	return nd;
+}
+
+// Same-level cells sit 2h apart, so the pure code's "centre separation
+// exceeds two cell half-widths" is exactly "grid index differs by more
+// than one" - colleagues are the 3x3 block, everything else is far field.
+static int fmm_far(const FmmNode *a, const FmmNode *b)
+{
+	int dx = a->ix - b->ix, dz = a->iz - b->iz;
+	if (dx < 0) dx = -dx;
+	if (dz < 0) dz = -dz;
+	return dx > 1 || dz > 1;
 }
 
 void vsea_fmm(const double *xs, const double *zs, const double *om,
@@ -302,9 +330,11 @@ void vsea_fmm(const double *xs, const double *zs, const double *om,
 	}
 	// --- tree
 	fnodes_n = 0;
+	for (int i = 0; i < FMM_GRID_CELLS; i++)
+		fgrid[i] = -1;
 	for (int i = 0; i < nn; i++)
 		forder[i] = i;
-	fmm_split(-1, 0.0, 0.0, bounds, 0, 0, nn);
+	fmm_split(-1, 0.0, 0.0, bounds, 0, 0, 0, 0, nn);
 	for (int d = 0; d <= FMM_DEPTH; d++)
 		flevel_n[d] = 0;
 	for (int id = 0; id < fnodes_n; id++) {
@@ -340,27 +370,39 @@ void vsea_fmm(const double *xs, const double *zs, const double *om,
 			} else {
 				fmm_l2l(id);
 			}
-			// interaction list: same level, separated by more than 2
-			// cell widths, whose PARENTS touch (or are both at the root)
-			for (int sj = 0; sj < flevel_n[d]; sj++) {
-				int sid = flevels[d][sj];
-				if (sid == id)
-					continue;
-				FmmNode *src = &fnodes[sid];
-				if (fmm_cheb(src, nd) / nd->h <= 2.0)
-					continue;
-				if (nd->depth > 1) {
-					const FmmNode *np = &fnodes[nd->parent];
-					const FmmNode *sp = &fnodes[src->parent];
-					if (fmm_cheb(np, sp) / np->h > 2.0)
-						continue;
-				}
-				fmm_m2l(id, sid);
+			// Interaction list: the children of the parent's colleagues
+			// that are NOT this cell's own colleagues. Identical to the
+			// pure rule (same level, separated by more than two cell
+			// widths, parents touching) but 36 candidates instead of a
+			// scan over every cell on the level.
+			if (d >= 1) {
+				const FmmNode *par = &fnodes[nd->parent];
+				for (int dx = -1; dx <= 1; dx++)
+					for (int dz = -1; dz <= 1; dz++) {
+						int pc = fmm_at(d - 1, par->ix + dx, par->iz + dz);
+						if (pc < 0)
+							continue;
+						for (int q = 0; q < 4; q++) {
+							int sid = fnodes[pc].kid[q];
+							if (sid < 0 || sid == id)
+								continue;
+							if (fmm_far(&fnodes[sid], nd))
+								fmm_m2l(id, sid);
+						}
+					}
 			}
 		}
 	}
-	// --- near-field neighbour lists per leaf (cells compared at the
-	// coarser of the two levels, exactly like the pure adjacency)
+	// --- near-field neighbour lists per leaf.
+	//
+	// The pure rule: two leaves are near when their ancestors, compared at
+	// the coarser of the two levels, are colleagues. Split by which leaf is
+	// deeper and it becomes two cheap walks:
+	//   (a) leaves at or below this leaf's level - every particle under one
+	//       of its own colleagues, and a node's particles are already a
+	//       contiguous forder slice, so no descent is needed;
+	//   (b) leaves above it - colleagues of each ancestor that are leaves.
+	// Disjoint by construction, so nothing is counted twice.
 	int nbr_n = 0;
 	for (int id = 0; id < fnodes_n; id++) {
 		fnbr_off[id] = nbr_n;
@@ -368,34 +410,27 @@ void vsea_fmm(const double *xs, const double *zs, const double *om,
 		if (!fnodes[id].leaf)
 			continue;
 		const FmmNode *a = &fnodes[id];
-		for (int oid = 0; oid < fnodes_n; oid++) {
-			if (!fnodes[oid].leaf || oid == id)
-				continue;  // NOTE: pure includes the leaf itself via
-				           // adjacency-to-self; handled below
-			const FmmNode *b = &fnodes[oid];
-			int lvl = a->depth < b->depth ? a->depth : b->depth;
-			const FmmNode *ca = fmm_ancestor(a, lvl);
-			const FmmNode *cb = fmm_ancestor(b, lvl);
-			double sep = fmm_cheb(ca, cb);
-			if (sep > 2.0 * ca->h + 1e-12)
-				continue;
-			for (int i = b->begin; i < b->end; i++) {
-				if (nbr_n >= FMM_MAXNBR) {
-					fnbr_all[id] = 1;
-					break;
+		int overflow = 0;
+		for (int lvl = a->depth; lvl >= 0 && !overflow; lvl--) {
+			const FmmNode *anc = fmm_ancestor(a, lvl);
+			for (int dx = -1; dx <= 1 && !overflow; dx++)
+				for (int dz = -1; dz <= 1 && !overflow; dz++) {
+					int cid = fmm_at(lvl, anc->ix + dx, anc->iz + dz);
+					if (cid < 0)
+						continue;
+					// above this leaf's level only leaves count; at its own
+					// level the whole subtree is near field
+					if (lvl < a->depth && !fnodes[cid].leaf)
+						continue;
+					const FmmNode *c = &fnodes[cid];
+					if (nbr_n + (c->end - c->begin) > FMM_MAXNBR) {
+						fnbr_all[id] = 1;
+						overflow = 1;
+						break;
+					}
+					for (int i = c->begin; i < c->end; i++)
+						fnbr[nbr_n++] = forder[i];
 				}
-				fnbr[nbr_n++] = forder[i];
-			}
-			if (fnbr_all[id])
-				break;
-		}
-		// the leaf's own particles are its nearest neighbours
-		for (int i = a->begin; i < a->end; i++) {
-			if (nbr_n >= FMM_MAXNBR) {
-				fnbr_all[id] = 1;
-				break;
-			}
-			fnbr[nbr_n++] = forder[i];
 		}
 	}
 	fnbr_off[fnodes_n] = nbr_n;
@@ -453,26 +488,294 @@ void vsea_fmm(const double *xs, const double *zs, const double *om,
 	}
 }
 
-// ---------------------------------------------------------------- mesh -----
+// ---------------------------------------------------------------- sim -----
 //
-// The sheet is drawn as two blocks of shared-corner quads:
-//   - the field: the particle lattice (particles sit on a regular grid,
-//     one tile per particle), heights = spray + ambient swell;
-//   - the ring: the same swell continuing past the field to the horizon,
-//     coarser tiles, no foam.
-// Per-corner normals come from central differences over corner heights;
-// color = swell/foam mix x sun diffuse + specular toward the camera.
-// Everything mirrors the pure voxel.light math so the look matches.
+// The ocean's particle state, owned in C as flat arrays.
+//
+// It used to live as a Clojure vector of maps and cross the FFI boundary
+// field-by-field twice a frame - roughly 30k ffi/write calls, which cost
+// more than the solve itself. Here jolt never touches a particle in the hot
+// path: it asks for a step, and the renderer's mesh is filled from the same
+// arrays. voxel.ocean/step-ocean is still the readable reference and the
+// tests hold this to it step for step.
+//
+// Every constant below mirrors voxel.ocean; voxel.ocean-test asserts they
+// have not drifted apart.
 
-#define SEA_MAX_FIELD 8192          // particle-lattice capacity
-#define SEA_RING_STEP 6.0           // ring tile size, world units
-#define SEA_HORIZON 66.0            // ring extent
-#define SEA_RING_INNER 48.0         // ring starts here (under the field)
+#define SIM_SWELL_AMP   0.45
+#define SIM_SWELL_K     0.55
+#define SIM_SWELL_W     1.3
+#define SIM_SWELL_DIRX  0.86
+#define SIM_SWELL_DIRZ  0.51
+#define SIM_CHOP_RATE   0.35
+#define SIM_CHOP_AMP    0.0009
+#define SIM_DRAG        0.90
+#define SIM_SURFACE_BREAK 0.7
+#define SIM_SURFACE_K   2.5
+#define SIM_SURFACE_C   3.0
+#define SIM_SPRAY_G     20.0
+#define SIM_ACTIVE_EPS  1e-9
+#define SIM_FIELD_RADIUS 14.0
 
 typedef struct {
-	int cols, rows;             // particle lattice dimensions
-	double step;               // particle spacing, world units
-	double origin;             // lattice origin (square: [-origin, origin])
+	int n, cols, ready, ambient, sparse_max;
+	double spacing, extent, bounds, viscosity, t;
+	double *x, *z, *y, *vx, *vy, *vz, *om;
+	double *ux, *uz;            // this step's field velocity
+	int64_t *act;               // scratch: indices of the live vortices
+} SeaSim;
+
+static SeaSim sim = {0};
+
+// Deterministic pseudo-random in [-1,1) from position and time bucket, bit
+// for bit the same as voxel.ocean/chop-rand: the ambient turbulence field
+// has to be reproducible in both implementations or they cannot be compared.
+static double sim_chop_rand(double x, double z, int64_t k)
+{
+	int64_t h = ((int64_t)(x * 8.0) * 374761393)
+	          ^ ((int64_t)(z * 8.0) * 668265263)
+	          ^ (k * 1274126177);
+	if (h < 0)
+		h = -h;
+	return 2.0 * ((double)(h % 1000003) / 1000003.0) - 1.0;
+}
+
+void vsea_sim_free(void)
+{
+	if (!sim.ready)
+		return;
+	free(sim.x); free(sim.z); free(sim.y);
+	free(sim.vx); free(sim.vy); free(sim.vz);
+	free(sim.om); free(sim.ux); free(sim.uz); free(sim.act);
+	memset(&sim, 0, sizeof(sim));
+}
+
+// vsea_sim_init(cols, extent, bounds, ambient, viscosity, sparse_max): a
+// still sheet of cols x cols particles evenly covering [-extent, extent]^2.
+// bounds is the reflecting domain half-width; sparse_max is the live-vortex
+// count above which the field solve switches from exact sums to the FMM
+// (voxel.ocean owns the value, so there is one definition of it).
+void vsea_sim_init(int cols, double extent, double bounds,
+                   int ambient, double viscosity, int sparse_max)
+{
+	vsea_sim_free();
+	if (cols < 2)
+		cols = 2;
+	int n = cols * cols;
+	if (n > FMM_MAXN)
+		return;
+	sim.n = n;
+	sim.cols = cols;
+	sim.extent = extent;
+	sim.bounds = bounds;
+	sim.ambient = ambient;
+	sim.viscosity = viscosity;
+	sim.sparse_max = sparse_max;
+	sim.spacing = 2.0 * extent / (double)(cols - 1);
+	sim.t = 0.0;
+	size_t b = (size_t)n * sizeof(double);
+	sim.x = malloc(b); sim.z = malloc(b); sim.y = malloc(b);
+	sim.vx = malloc(b); sim.vy = malloc(b); sim.vz = malloc(b);
+	sim.om = malloc(b); sim.ux = malloc(b); sim.uz = malloc(b);
+	sim.act = malloc((size_t)n * sizeof(int64_t));
+	for (int i = 0; i < cols; i++)
+		for (int j = 0; j < cols; j++) {
+			int p = i * cols + j;
+			sim.x[p] = -extent + i * sim.spacing;
+			sim.z[p] = -extent + j * sim.spacing;
+			sim.y[p] = 0.0;
+			sim.vx[p] = 0.0; sim.vy[p] = 0.0; sim.vz[p] = 0.0;
+			sim.om[p] = 0.0;
+			sim.ux[p] = 0.0; sim.uz[p] = 0.0;
+		}
+	sim.ready = 1;
+}
+
+int64_t vsea_sim_count(void) { return sim.ready ? sim.n : 0; }
+int64_t vsea_sim_cols(void) { return sim.ready ? sim.cols : 0; }
+double vsea_sim_spacing(void) { return sim.ready ? sim.spacing : 0.0; }
+double vsea_sim_extent(void) { return sim.ready ? sim.extent : 0.0; }
+double vsea_sim_time(void) { return sim.ready ? sim.t : 0.0; }
+
+// vsea_sim_load(...): overwrite the whole particle state. Only the tests use
+// this, to put the C sim and the pure reference on identical footing.
+void vsea_sim_load(const double *x, const double *z, const double *y,
+                   const double *vx, const double *vy, const double *vz,
+                   const double *om, int64_t n, double t)
+{
+	if (!sim.ready || n != sim.n)
+		return;
+	for (int i = 0; i < sim.n; i++) {
+		sim.x[i] = x[i]; sim.z[i] = z[i]; sim.y[i] = y[i];
+		sim.vx[i] = vx[i]; sim.vy[i] = vy[i]; sim.vz[i] = vz[i];
+		sim.om[i] = om[i];
+	}
+	sim.t = t;
+}
+
+void vsea_sim_read(double *x, double *z, double *y,
+                   double *vx, double *vy, double *vz, double *om)
+{
+	if (!sim.ready)
+		return;
+	for (int i = 0; i < sim.n; i++) {
+		x[i] = sim.x[i]; z[i] = sim.z[i]; y[i] = sim.y[i];
+		vx[i] = sim.vx[i]; vy[i] = sim.vy[i]; vz[i] = sim.vz[i];
+		om[i] = sim.om[i];
+	}
+}
+
+double vsea_sim_circulation(void)
+{
+	double s = 0.0;
+	for (int i = 0; i < sim.n; i++)
+		s += sim.om[i];
+	return s;
+}
+
+// The velocity field at whatever this sea state makes cheapest, mirroring
+// voxel.ocean/velocities: a dead calm costs nothing, a scattering of live
+// vortices is summed exactly out to SIM_FIELD_RADIUS, and a fully churned
+// sea goes to the FMM so the cost stays linear in the particle count.
+static void sim_velocities(void)
+{
+	int na = 0;
+	for (int i = 0; i < sim.n; i++)
+		if (fabs(sim.om[i]) > SIM_ACTIVE_EPS)
+			sim.act[na++] = i;
+	if (na == 0) {
+		memset(sim.ux, 0, (size_t)sim.n * sizeof(double));
+		memset(sim.uz, 0, (size_t)sim.n * sizeof(double));
+	} else if (na <= sim.sparse_max) {
+		vsea_field(sim.x, sim.z, sim.om, sim.act, na,
+		           SIM_FIELD_RADIUS * SIM_FIELD_RADIUS, SIM_ACTIVE_EPS,
+		           sim.ux, sim.uz, sim.n);
+	} else {
+		vsea_fmm(sim.x, sim.z, sim.om, sim.n, FMM_P, sim.bounds,
+		         sim.ux, sim.uz);
+	}
+}
+
+// vsea_sim_step(dt, blasts, nb, hulls, nh): one ocean step.
+// blasts pack (x, z, r, power); hulls pack (x, z, r, push, swirl).
+// The order matches voxel.ocean/step-ocean exactly: couplings, ambient
+// forcing, the field solve, then advection and the vertical oscillator.
+void vsea_sim_step(double dt, const double *blasts, int64_t nb,
+                   const double *hulls, int64_t nh)
+{
+	if (!sim.ready)
+		return;
+	int n = sim.n;
+
+	for (int64_t b = 0; b < nb; b++) {
+		double bx = blasts[b * 4], bz = blasts[b * 4 + 1];
+		double br = blasts[b * 4 + 2], bp = blasts[b * 4 + 3];
+		for (int i = 0; i < n; i++) {
+			double dx = sim.x[i] - bx, dz = sim.z[i] - bz;
+			double d = sqrt(dx * dx + dz * dz);
+			if (d >= br)
+				continue;
+			double w = 1.0 - d / br;
+			sim.vy[i] += bp * w;
+			sim.om[i] += bp * 0.8 * w;
+		}
+	}
+	for (int64_t hh = 0; hh < nh; hh++) {
+		double hx = hulls[hh * 5], hz = hulls[hh * 5 + 1];
+		double hr = hulls[hh * 5 + 2];
+		double push = hulls[hh * 5 + 3], swirl = hulls[hh * 5 + 4];
+		for (int i = 0; i < n; i++) {
+			double dx = sim.x[i] - hx, dz = sim.z[i] - hz;
+			double d = sqrt(dx * dx + dz * dz);
+			if (d >= hr)
+				continue;
+			double w = 1.0 - d / hr;
+			double dd = d < 1e-6 ? 1e-6 : d;
+			double nx = dx / dd, nz = dz / dd;
+			sim.vx[i] += push * w * nx;
+			sim.vz[i] += push * w * nz;
+			sim.vy[i] += 0.15 * push * w;
+			sim.om[i] += swirl * w * (nz - nx);
+		}
+	}
+	if (sim.ambient) {
+		double kx = SIM_SWELL_K * SIM_SWELL_DIRX;
+		double kz = SIM_SWELL_K * SIM_SWELL_DIRZ;
+		int64_t kb = (int64_t)(sim.t / SIM_CHOP_RATE);
+		for (int i = 0; i < n; i++) {
+			double ph = kx * sim.x[i] + kz * sim.z[i] - SIM_SWELL_W * sim.t;
+			sim.vy[i] += SIM_SWELL_AMP * dt * sin(ph);
+			sim.om[i] += SIM_CHOP_AMP * dt
+			           * sim_chop_rand(sim.x[i], sim.z[i], kb);
+		}
+	}
+
+	sim_velocities();
+
+	double drag = pow(SIM_DRAG, dt);
+	double decay = 1.0 - sim.viscosity * dt;
+	double b = sim.bounds;
+	for (int i = 0; i < n; i++) {
+		double fx = sim.ux[i], fz = sim.uz[i];
+		// water with nothing happening to it is left exactly alone, so a
+		// calm sea costs a comparison per particle and no arithmetic
+		if (fx == 0.0 && fz == 0.0 && sim.vx[i] == 0.0 && sim.vz[i] == 0.0
+		    && sim.vy[i] == 0.0 && sim.y[i] == 0.0
+		    && fabs(sim.om[i]) <= SIM_ACTIVE_EPS)
+			continue;
+		double vx = sim.vx[i] + fx, vz = sim.vz[i] + fz;
+		double x = sim.x[i] + vx * dt, z = sim.z[i] + vz * dt;
+		if (x > b) { x = b; vx = -vx; }
+		else if (x < -b) { x = -b; vx = -vx; }
+		if (z > b) { z = b; vz = -vz; }
+		else if (z < -b) { z = -b; vz = -vz; }
+		sim.x[i] = x;
+		sim.z[i] = z;
+		sim.vx[i] = (vx - fx) * drag;
+		sim.vz[i] = (vz - fz) * drag;
+		sim.om[i] *= decay;
+		// vertical: airborne spray falls ballistically, surface water is a
+		// damped oscillator about y = 0 that the swell rides into waves
+		if (sim.y[i] > SIM_SURFACE_BREAK) {
+			double y = sim.y[i] + sim.vy[i] * dt;
+			double vy = sim.vy[i] - SIM_SPRAY_G * dt;
+			if (y < SIM_SURFACE_BREAK) {
+				sim.y[i] = SIM_SURFACE_BREAK;
+				sim.vy[i] = 0.1 * vy;
+			} else {
+				sim.y[i] = y;
+				sim.vy[i] = vy;
+			}
+		} else {
+			double y = sim.y[i] + sim.vy[i] * dt;
+			if (y < -0.6)
+				y = -0.6;
+			sim.vy[i] -= dt * (SIM_SURFACE_K * y
+			                   + SIM_SURFACE_C * sim.vy[i]);
+			sim.y[i] = y;
+		}
+	}
+	sim.t += dt;
+}
+
+// ---------------------------------------------------------------- mesh -----
+//
+// The sheet IS the particle set: one vertex per particle, two triangles per
+// lattice tile, heights straight off sim.y. Nothing analytic is mixed in.
+//
+// It used to add a hardcoded three-term sine to every corner and ring the
+// field with flat swell-only tiles out to a horizon, which meant most of the
+// wave motion a player saw was a scrolling function rather than the
+// simulation, and the water ended in a visible diamond. The sea is now big
+// enough to run past the frame (voxel.camera sizes it), so there is nothing
+// to ring, and the only height in the mesh is the height the sim computed.
+//
+// Per-vertex normals come from central differences over lattice neighbours;
+// colour is a swell/foam mix times sun diffuse plus specular.
+
+typedef struct {
+	int cols, n;
+	double spacing, extent;
 	Mesh mesh;
 	Material mat;
 	int ready;
@@ -485,112 +788,53 @@ typedef struct {
 
 static SeaMesh sea = {0};
 
-static double swell_h(double x, double z, double t)
+static void sea_release(void)
 {
-	return 0.10 * sin(0.45 * x + 0.9 * t)
-	     + 0.08 * sin(0.4 * z - 0.7 * t)
-	     + 0.06 * sin(0.28 * (x + z) + 0.5 * t);
-}
-
-// height of lattice corner (ci, cj): mean of the adjacent particle sprays
-// plus swell at the corner position. Missing neighbours fall back to the
-// corner's own swell so the edge of the field stays water.
-static double corner_h(const double *spray, int cols, int rows,
-                        double step, double origin, int ci, int cj, double t)
-{
-	int i0 = ci - 1, j0 = cj - 1, cnt = 0;
-	double sum = 0.0;
-	for (int i = i0; i <= i0 + 1 && i < cols; i++) {
-		if (i < 0)
-			continue;
-		for (int j = j0; j <= j0 + 1 && j < rows; j++) {
-			if (j < 0)
-				continue;
-			sum += spray[i * rows + j];
-			cnt++;
-		}
-	}
-	double x = -origin + ci * step;
-	double z = -origin + cj * step;
-	double sw = swell_h(x, z, t);
-	return (cnt ? sum / cnt : 0.0) + sw;
-}
-
-static double corner_foam(const double *spray, const double *om,
-                          int cols, int rows, int ci, int cj)
-{
-	int i0 = ci - 1, j0 = cj - 1, cnt = 0;
-	double sum = 0.0;
-	for (int i = i0; i <= i0 + 1 && i < cols; i++) {
-		if (i < 0)
-			continue;
-		for (int j = j0; j <= j0 + 1 && j < rows; j++) {
-			if (j < 0)
-				continue;
-			int p = i * rows + j;
-			double f = 0.8 * spray[p] + 0.3 * fabs(om[p]);
-			sum += f > 1.0 ? 1.0 : f;
-			cnt++;
-		}
-	}
-	return cnt ? sum / cnt : 0.0;
-}
-
-// vsea_mesh_init(cols, rows, step, origin): (re)build the mesh for a
-// cols x rows particle lattice. Safe to call again on resize.
-void vsea_mesh_init(int cols, int rows, double step, double origin)
-{
-	if (sea.ready) {
-		if (sea.gl) {
-			UnloadMesh(sea.mesh);  // frees the CPU arrays too
-		} else {
-			free(sea.verts); free(sea.norms);
-			free(sea.cols_); free(sea.idx);
-		}
+	if (!sea.ready)
+		return;
+	if (sea.gl) {
+		UnloadMesh(sea.mesh);  // frees the CPU arrays too
+	} else {
+		free(sea.verts); free(sea.norms);
+		free(sea.cols_); free(sea.idx);
 	}
 	memset(&sea, 0, sizeof(sea));
+}
+
+// vsea_mesh_init(): build the sheet for the live sim's lattice. Safe to
+// call again after the sim is resized.
+void vsea_mesh_init(void)
+{
+	sea_release();
+	if (!sim.ready)
+		return;
+	int cols = sim.cols;
+	if (cols * cols > 65535)   // raylib indices are unsigned short
+		return;
 	sea.cols = cols;
-	sea.rows = rows;
-	sea.step = step;
-	sea.origin = origin;
-
-	// corners: (cols+1) x (rows+1) for the field
-	int fc = (cols + 1) * (rows + 1);
-	// ring tiles on a SEA_RING_STEP lattice within the horizon, outside the
-	// inner square; corners only where a tile touches
-	int ring_tiles = 0;
-	int rmin = (int)floor(-SEA_HORIZON / SEA_RING_STEP);
-	int rmax = (int)ceil(SEA_HORIZON / SEA_RING_STEP);
-	for (int i = rmin; i < rmax; i++)
-		for (int j = rmin; j < rmax; j++) {
-			double x0 = i * SEA_RING_STEP, z0 = j * SEA_RING_STEP;
-			if (fabs(x0) >= SEA_RING_INNER || fabs(z0) >= SEA_RING_INNER)
-				if (fabs(x0 + SEA_RING_STEP) > SEA_RING_INNER
-				    || fabs(z0 + SEA_RING_STEP) > SEA_RING_INNER)
-					ring_tiles++;
-		}
-
-	// ring tiles append 6 verts each in update (2 per tri, shared quad not
-	// reused) — allocation must match that write or update runs off the end
-	sea.vcount = fc + ring_tiles * 6;
-	sea.icount = cols * rows * 6 + ring_tiles * 6;
-	sea.verts = malloc(sea.vcount * 3 * sizeof(float));
-	sea.norms = malloc(sea.vcount * 3 * sizeof(float));
-	sea.cols_ = malloc(sea.vcount * 4);
-	sea.idx = malloc(sea.icount * sizeof(uint16_t));
-
-	// static index buffer for the field: two triangles per particle tile
+	sea.n = sim.n;
+	sea.spacing = sim.spacing;
+	sea.extent = sim.extent;
+	sea.vcount = cols * cols;
+	sea.icount = (cols - 1) * (cols - 1) * 6;
+	sea.verts = calloc((size_t)sea.vcount * 3, sizeof(float));
+	sea.norms = calloc((size_t)sea.vcount * 3, sizeof(float));
+	sea.cols_ = calloc((size_t)sea.vcount, 4);
+	sea.idx = malloc((size_t)sea.icount * sizeof(uint16_t));
 	int v = 0;
-	for (int i = 0; i < cols; i++)
-		for (int j = 0; j < rows; j++) {
-			int c00 = i * (rows + 1) + j;
-			int c10 = c00 + (rows + 1);
+	for (int i = 0; i < cols - 1; i++)
+		for (int j = 0; j < cols - 1; j++) {
+			int c00 = i * cols + j;
+			int c10 = c00 + cols;
 			int c01 = c00 + 1;
 			int c11 = c10 + 1;
-			sea.idx[v++] = (uint16_t)c01; sea.idx[v++] = (uint16_t)c11; sea.idx[v++] = (uint16_t)c10;
-			sea.idx[v++] = (uint16_t)c01; sea.idx[v++] = (uint16_t)c10; sea.idx[v++] = (uint16_t)c00;
+			sea.idx[v++] = (uint16_t)c01;
+			sea.idx[v++] = (uint16_t)c11;
+			sea.idx[v++] = (uint16_t)c10;
+			sea.idx[v++] = (uint16_t)c01;
+			sea.idx[v++] = (uint16_t)c10;
+			sea.idx[v++] = (uint16_t)c00;
 		}
-	// ring indices appended by update (vertex order depends on tiles)
 	sea.mesh.vertexCount = sea.vcount;
 	sea.mesh.triangleCount = sea.icount / 3;
 	sea.mesh.vertices = sea.verts;
@@ -606,87 +850,43 @@ void vsea_mesh_init(int cols, int rows, double step, double origin)
 	sea.ready = 1;
 }
 
-// vsea_mesh_update(spray, xs, zs, om, n, t, sun[3], half[3],
-//                  deep[4], swell[4], foamc[4]):
-// refill the mesh for frame time t from the per-particle spray heights and
-// vorticities (foam), then upload. Colors mirror voxel.light's shading.
-// Field corners ride the mean (x,z) of their adjacent particles (clamped
-// near the lattice) so wake advection and swirls visibly drag the sheet.
-void vsea_mesh_update(const double *spray, const double *xs,
-                      const double *zs, const double *om, int64_t n,
-                      double t,
-                      const double *sun, const double *half,
-                      const unsigned char *deep,
-                      const unsigned char *swellc,
-                      const unsigned char *foamc)
+// vsea_mesh_update(sun[3], half[3], swell[4], foam[4]): refill the sheet
+// from the live particle state and upload it.
+void vsea_mesh_update(const double *sun, const double *half,
+                      const unsigned char *swellc, const unsigned char *foamc)
 {
-	(void)n;
-	(void)deep;
-	int cols = sea.cols, rows = sea.rows;
-	double step = sea.step, origin = sea.origin;
-
-	// per-corner heights/foam for the field
-	int W = rows + 1;
-	double *hs = malloc((cols + 1) * W * sizeof(double));
-	double *fs = malloc((cols + 1) * W * sizeof(double));
-	for (int ci = 0; ci <= cols; ci++)
-		for (int cj = 0; cj <= rows; cj++) {
-			hs[ci * W + cj] = corner_h(spray, cols, rows, step, origin,
-			                           ci, cj, t);
-			fs[ci * W + cj] = corner_foam(spray, om, cols, rows, ci, cj);
-		}
-
-	// fill field vertices: position, normal (central differences), color
+	if (!sea.ready || !sim.ready || sea.n != sim.n)
+		return;
+	int cols = sea.cols;
+	double step = sea.spacing;
 	double two_s = 2.0 * step;
-	for (int ci = 0; ci <= cols; ci++)
-		for (int cj = 0; cj <= rows; cj++) {
-			int vi = ci * W + cj;
-			double x = -origin + ci * step;
-			double z = -origin + cj * step;
-			{
-				double mx = 0.0, mz = 0.0;
-				int pcnt = 0, i0 = ci - 1, j0 = cj - 1;
-				for (int i = i0; i <= i0 + 1 && i < cols; i++) {
-					if (i < 0)
-						continue;
-					for (int j = j0; j <= j0 + 1 && j < rows; j++) {
-						if (j < 0)
-							continue;
-						int p2 = i * rows + j;
-						mx += xs[p2];
-						mz += zs[p2];
-						pcnt++;
-					}
-				}
-				if (pcnt) {
-					mx /= pcnt;
-					mz /= pcnt;
-					double ddx = mx - x, ddz = mz - z, cl = 0.9;
-					if (ddx > cl)
-						ddx = cl;
-					else if (ddx < -cl)
-						ddx = -cl;
-					if (ddz > cl)
-						ddz = cl;
-					else if (ddz < -cl)
-						ddz = -cl;
-					x += ddx;
-					z += ddz;
-				}
-			}
-			double hm = ci > 0 ? hs[(ci - 1) * W + cj] : hs[vi];
-			double hp = ci < cols ? hs[(ci + 1) * W + cj] : hs[vi];
-			double gm = cj > 0 ? hs[ci * W + cj - 1] : hs[vi];
-			double gp = cj < rows ? hs[ci * W + cj + 1] : hs[vi];
+	// particles advect, so a vertex is drawn where its particle actually is
+	// - that is the wake and the swirls showing in the surface. Clamped to
+	// under half a tile so the sheet can drift but never fold over itself.
+	double slack = 0.45 * step;
+	for (int i = 0; i < cols; i++)
+		for (int j = 0; j < cols; j++) {
+			int p = i * cols + j;
+			double rx = -sea.extent + i * step;
+			double rz = -sea.extent + j * step;
+			double dx = sim.x[p] - rx, dz = sim.z[p] - rz;
+			if (dx > slack) dx = slack; else if (dx < -slack) dx = -slack;
+			if (dz > slack) dz = slack; else if (dz < -slack) dz = -slack;
+
+			double hm = sim.y[i > 0 ? p - cols : p];
+			double hp = sim.y[i < cols - 1 ? p + cols : p];
+			double gm = sim.y[j > 0 ? p - 1 : p];
+			double gp = sim.y[j < cols - 1 ? p + 1 : p];
 			double gx = (hp - hm) / two_s;
 			double gz = (gp - gm) / two_s;
 			double l = sqrt(1.0 + gx * gx + gz * gz);
 			double nx = -gx / l, ny = 1.0 / l, nz = -gz / l;
-			float *vp = sea.verts + vi * 3;
-			vp[0] = (float)x;
-			vp[1] = (float)(hs[vi] + 0.05);
-			vp[2] = (float)z;
-			float *np = sea.norms + vi * 3;
+
+			float *vp = sea.verts + p * 3;
+			vp[0] = (float)(rx + dx);
+			vp[1] = (float)(sim.y[p] + 0.05);
+			vp[2] = (float)(rz + dz);
+			float *np = sea.norms + p * 3;
 			np[0] = (float)nx; np[1] = (float)ny; np[2] = (float)nz;
 
 			double diff = nx * sun[0] + ny * sun[1] + nz * sun[2];
@@ -696,11 +896,14 @@ void vsea_mesh_update(const double *spray, const double *xs,
 			if (spec < 0.0)
 				spec = 0.0;
 			spec = pow(spec, 24.0);
-			double f = fs[vi];
+			// foam is thrown water and torn-up vorticity; ambient chop is
+			// far below the threshold, a shell burst saturates it
+			double f = 0.8 * (sim.y[p] > 0.0 ? sim.y[p] : 0.0)
+			         + 0.3 * fabs(sim.om[p]);
 			if (f > 1.0)
 				f = 1.0;
 			double lit = 1.9 * diff + 0.7 * spec;
-			unsigned char *c = sea.cols_ + vi * 4;
+			unsigned char *c = sea.cols_ + p * 4;
 			// rgb only: scaling alpha by the light makes shaded water
 			// translucent and the sky shows through the troughs
 			for (int k = 0; k < 3; k++) {
@@ -717,74 +920,13 @@ void vsea_mesh_update(const double *spray, const double *xs,
 			    + (int)((foamc[3] - swellc[3]) * f));
 		}
 
-	// ring: swell-only tiles beyond the field, slightly lower to hide the
-	// seam under the field edge
-	int vc = (cols + 1) * W;
-	int ic = cols * rows * 6;
-	int rmin = (int)floor(-SEA_HORIZON / SEA_RING_STEP);
-	int rmax = (int)ceil(SEA_HORIZON / SEA_RING_STEP);
-	for (int i = rmin; i < rmax; i++)
-		for (int j = rmin; j < rmax; j++) {
-			double x0 = i * SEA_RING_STEP, z0 = j * SEA_RING_STEP;
-			if (!(fabs(x0) >= SEA_RING_INNER || fabs(z0) >= SEA_RING_INNER))
-				continue;
-			if (!(fabs(x0 + SEA_RING_STEP) > SEA_RING_INNER
-			      || fabs(z0 + SEA_RING_STEP) > SEA_RING_INNER))
-				continue;
-			double xs[4] = { x0, x0 + SEA_RING_STEP, x0, x0 + SEA_RING_STEP };
-			double zs[4] = { z0, z0, z0 + SEA_RING_STEP, z0 + SEA_RING_STEP };
-			// v0 v1 v2 v3 -> tris (v2 v3 v1) (v2 v1 v0), flat swell quad
-			int order[6] = { 2, 3, 1, 2, 1, 0 };
-			for (int k = 0; k < 6; k++) {
-				int p = order[k];
-				int vi = vc++;
-				double x = xs[p], z = zs[p];
-				double h = swell_h(x, z, t) - 0.02;
-				// ring normal: swell gradient by central differences
-				double gx = (swell_h(x + SEA_RING_STEP, z, t)
-				             - swell_h(x - SEA_RING_STEP, z, t))
-				            / (2.0 * SEA_RING_STEP);
-				double gz = (swell_h(x, z + SEA_RING_STEP, t)
-				             - swell_h(x, z - SEA_RING_STEP, t))
-				            / (2.0 * SEA_RING_STEP);
-				double l = sqrt(1.0 + gx * gx + gz * gz);
-				double nx = -gx / l, ny = 1.0 / l, nz = -gz / l;
-				sea.verts[vi * 3] = (float)x;
-				sea.verts[vi * 3 + 1] = (float)(h + 0.05);
-				sea.verts[vi * 3 + 2] = (float)z;
-				sea.norms[vi * 3] = (float)nx;
-				sea.norms[vi * 3 + 1] = (float)ny;
-				sea.norms[vi * 3 + 2] = (float)nz;
-				double diff = nx * sun[0] + ny * sun[1] + nz * sun[2];
-				if (diff < 0.0)
-					diff = 0.0;
-				double lit = 1.9 * diff;
-				unsigned char *c = sea.cols_ + vi * 4;
-				for (int q = 0; q < 3; q++) {
-					int v8 = (int)(swellc[q] * lit);
-					if (v8 < 0)
-						v8 = 0;
-					if (v8 > 255)
-						v8 = 255;
-					c[q] = (unsigned char)v8;
-				}
-				c[3] = swellc[3];
-				sea.idx[ic++] = (uint16_t)vi;
-			}
-		}
-
 	if (sea.gl) {
 		UpdateMeshBuffer(sea.mesh, 0, sea.verts,
 		                sea.vcount * 3 * sizeof(float), 0);
 		UpdateMeshBuffer(sea.mesh, 2, sea.norms,
 		                sea.vcount * 3 * sizeof(float), 0);
-		UpdateMeshBuffer(sea.mesh, 3, sea.cols_,
-		                sea.vcount * 4, 0);
-		UpdateMeshBuffer(sea.mesh, 6, sea.idx,
-		                sea.icount * sizeof(uint16_t), 0);
+		UpdateMeshBuffer(sea.mesh, 3, sea.cols_, sea.vcount * 4, 0);
 	}
-	free(hs);
-	free(fs);
 }
 
 // vsea_mesh_vertex_count(): CPU vertex count, for headless inspection.
@@ -804,7 +946,7 @@ void vsea_mesh_read(double *verts, double *norms, unsigned char *cols)
 		verts[i] = sea.verts[i];
 		norms[i] = sea.norms[i];
 	}
-	memcpy(cols, sea.cols_, sea.vcount * 4);
+	memcpy(cols, sea.cols_, (size_t)sea.vcount * 4);
 }
 
 // vsea_mesh_draw(): one draw call for the whole sheet, identity transform.
@@ -823,15 +965,7 @@ void vsea_mesh_draw(void)
 
 void vsea_mesh_free(void)
 {
-	if (!sea.ready)
-		return;
-	if (sea.gl) {
-		UnloadMesh(sea.mesh);  // frees the CPU arrays too
-	} else {
-		free(sea.verts); free(sea.norms);
-		free(sea.cols_); free(sea.idx);
-	}
-	memset(&sea, 0, sizeof(sea));
+	sea_release();
 }
 
 
