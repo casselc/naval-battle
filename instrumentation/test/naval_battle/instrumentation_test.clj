@@ -47,21 +47,36 @@
         (sdk/shutdown! handle)))))
 
 (deftest observation-does-not-replace-application-exceptions
-  (let [error (ex-info "application-owned" {:private "do-not-record"})]
+  (let [exporter (memory/multisignal-exporter)
+        handle (sdk/init! {:service-name "naval-battle-test"
+                           :exporter exporter :processor :simple
+                           :metrics? true :runtime-metrics? false})
+        error (ex-info "captain@example.test" {:private "secret-target"})]
     (try
-      (inst/around-simulation {} [{:phase :playing} 0.01 {:bodies []}]
-                              #(throw error))
-      (is false "expected application exception")
-      (catch Throwable actual
-        (is (identical? error actual))))
-    (try
-      (inst/around-fire
-       {} [{:phase :playing :shells []}
-           :player ["captain@example.test" "secret-target"] 16.0]
-       #(throw error))
-      (is false "expected application exception")
-      (catch Throwable actual
-        (is (identical? error actual))))))
+      (try
+        (inst/around-simulation {} [{:phase :playing} 0.01 {:bodies []}]
+                                #(throw error))
+        (is false "expected application exception")
+        (catch Throwable actual
+          (is (identical? error actual))))
+      (try
+        (inst/around-fire
+         {} [{:phase :playing :shells []}
+             :player ["captain@example.test" "secret-target"] 16.0]
+         #(throw error))
+        (is false "expected application exception")
+        (catch Throwable actual
+          (is (identical? error actual))))
+      (let [spans (memory/spans exporter)
+            logs (memory/records exporter)
+            metrics (memory/metrics exporter)
+            exported (pr-str {:spans spans :logs logs :metrics metrics})]
+        (is (empty? spans))
+        (is (empty? logs))
+        (is (empty? metrics))
+        (is (not (re-find #"captain@example|secret-target" exported))))
+      (finally
+        (sdk/shutdown! handle)))))
 
 (deftest rejected-fire-is-silent
   (let [exporter (memory/multisignal-exporter)

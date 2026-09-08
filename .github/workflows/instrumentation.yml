@@ -59,7 +59,8 @@ jobs:
           set -euo pipefail
           install_dir="$RUNNER_TEMP/jolt-bin"
           curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/343f730922cf16fafe673b466cedcdcfe0596854/install \
-            | bash -s -- --dir "$install_dir" --version 0.8.3
+            | bash -s -- --dir "$install_dir" --version 0.8.3 \
+                --checksum e567297a6a840d9988a1aa082beb430aeaa0e6610a82a6f9ee0564e117745147
           echo "$install_dir" >> "$GITHUB_PATH"
 
       - name: Assert Jolt version
