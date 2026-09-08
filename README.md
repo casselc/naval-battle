@@ -74,6 +74,14 @@ jolt -M:test    # run the test suite
 All three native tasks are mtime-checked, so they are cheap to put in front
 of a run.
 
+### Fork-local OpenTelemetry case study
+
+The optional [instrumentation pack](instrumentation/README.md) observes nine
+exact game and engine seams without changing any existing gameplay or native
+source. Its gates compare plain and woven behavior, validate all three OTLP
+signals, and confirm that a separate oscope process can receive, display,
+persist, reopen, and query the telemetry.
+
 ### Opt-in embedded telemetry case study
 
 The `:telemetry` profile wraps the unchanged game entry point with an in-process

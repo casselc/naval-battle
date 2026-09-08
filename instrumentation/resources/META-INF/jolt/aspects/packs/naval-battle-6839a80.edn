@@ -1,0 +1,40 @@
+{:schema 1
+ :library {:id casselc/naval-battle
+           :version "6839a803fca573d3c65ff9df2bb9afbf10fa270b"}
+ :aspects
+ [{:id :game/frame-input
+   :match {:ns voxel.main :call voxel.input/snapshot :arity 2}
+   :advice-role :game/input
+   :expect {:matches 1}}
+  {:id :game/match-start
+   :match {:entry voxel.world/initial-state :arity 0}
+   :advice-role :game/session
+   :expect {:matches 1}}
+  {:id :game/physics-step
+   :match {:entry voxel.physics/step! :arity 2}
+   :advice-role :game/physics
+   :expect {:matches 1}}
+  {:id :game/render-frame
+   :match {:entry voxel.render/draw-frame! :arity 1}
+   :advice-role :game/render
+   :expect {:matches 1}}
+  {:id :game/frame-present
+   :match {:ns voxel.render :call voxel.raylib/end-drawing :arity 0}
+   :advice-role :game/frame
+   :expect {:matches 1}}
+  {:id :game/simulation-step
+   :match {:entry voxel.world/step-state :arity 3}
+   :advice-role :game/simulation
+   :expect {:matches 1}}
+  {:id :game/ocean-step
+   :match {:entry voxel.ocean/step-ocean :arity 4}
+   :advice-role :game/ocean
+   :expect {:matches 1}}
+  {:id :game/player-fire
+   :match {:entry voxel.world/fire :arity 4}
+   :advice-role :game/action
+   :expect {:matches 1}}
+  {:id :game/impact
+   :match {:entry voxel.world/apply-impact :arity 2}
+   :advice-role :game/impact
+   :expect {:matches 1}}]}
