@@ -29,7 +29,7 @@
 
 (def action-outcomes
   "Complete low-cardinality domain of fire outcomes."
-  #{"fired" "not_fired"})
+  #{"fired"})
 
 (def game-phases
   "Complete low-cardinality domain of game phases retained as telemetry."
@@ -75,7 +75,7 @@
                     :actions
                     (metrics/counter
                      meter "io.github.casselc.game.actions"
-                     {:description "Number of bounded player actions."
+                     {:description "Number of accepted player actions."
                       :unit "{action}"})
                     :frames
                     (metrics/counter
@@ -196,44 +196,38 @@
       (finally (try (trace/end! span) (catch :default _ nil))))))
 
 (defn around-fire
-  "Trace one fire attempt without retaining the target or any world entity id."
+  "Trace an accepted shot without retaining the target or any world entity id.
+
+  Cooldown and other rejected no-op calls are deliberately silent: the enemy
+  invokes this seam from the frame loop, so tracing every attempt would turn a
+  sparse domain signal into frame-rate telemetry."
   [_join-point [state role & _target-and-speed] proceed]
   (if (context/instrumentation-suppressed?)
     (proceed)
     (let [role (safe-player-role role)
           before (count (:shells state))
-          tracer (sdk/tracer scope-name {:version instrumentation-version})
-          span (trace/start-span
-                tracer "game.action.fire"
-                {:kind :internal
-                 :attributes
-                 {:io.github.casselc.game.action.name "fire"
-                  :io.github.casselc.game.ship.side role
-                  :io.github.casselc.game.match.phase
-                  (safe-game-phase (:phase state))}})]
-      (try
-        (trace/with-current-span span
-          (let [result (proceed)
-                outcome (if (> (count (:shells result)) before)
-                          "fired" "not_fired")
-                attrs {:io.github.casselc.game.action.name "fire"
-                       :io.github.casselc.game.action.outcome outcome
-                       :io.github.casselc.game.ship.side role}]
-            (try
-              (trace/set-attribute!
-               span :io.github.casselc.game.action.outcome outcome)
-              (metrics/add! (:actions (instruments)) 1 attrs)
-              (emit-event! "game.action.fire" "fire attempt completed" attrs)
-              (catch :default _ nil))
-            result))
-        (catch :default error
+          result (proceed)]
+      (when (> (count (:shells result)) before)
+        (let [attrs {:io.github.casselc.game.action.name "fire"
+                     :io.github.casselc.game.action.outcome "fired"
+                     :io.github.casselc.game.ship.side role}
+              span (trace/start-span
+                    (sdk/tracer scope-name
+                                {:version instrumentation-version})
+                    "game.action.fire"
+                    {:kind :internal
+                     :attributes
+                     (assoc attrs :io.github.casselc.game.match.phase
+                            (safe-game-phase (:phase state)))})]
           (try
-            (trace/record-exception! span error)
-            (trace/set-status! span :error)
-            (catch :default _ nil))
-          (throw error))
-        (finally
-          (try (trace/end! span) (catch :default _ nil)))))))
+            (trace/with-current-span span
+              (try
+                (metrics/add! (:actions (instruments)) 1 attrs)
+                (emit-event! "game.action.fire" "shot fired" attrs)
+                (catch :default _ nil)))
+            (finally
+              (try (trace/end! span) (catch :default _ nil))))))
+      result)))
 
 (def aspect-provider
   {:schema 1

@@ -9,7 +9,7 @@
     (is (= #{"input" "physics" "simulation" "ocean" "render"}
            inst/operation-names))
     (is (= #{"player" "enemy" "_OTHER"} inst/player-roles))
-    (is (= #{"fired" "not_fired"} inst/action-outcomes))
+    (is (= #{"fired"} inst/action-outcomes))
     (is (= #{"playing" "over" "_OTHER"} inst/game-phases)))
   (testing "arbitrary identifiers cannot become telemetry values"
     (doseq [value [nil true false 0 42 "captain@example.test"
@@ -53,7 +53,32 @@
                               #(throw error))
       (is false "expected application exception")
       (catch Throwable actual
+        (is (identical? error actual))))
+    (try
+      (inst/around-fire
+       {} [{:phase :playing :shells []}
+           :player ["captain@example.test" "secret-target"] 16.0]
+       #(throw error))
+      (is false "expected application exception")
+      (catch Throwable actual
         (is (identical? error actual))))))
+
+(deftest rejected-fire-is-silent
+  (let [exporter (memory/multisignal-exporter)
+        handle (sdk/init! {:service-name "naval-battle-test"
+                           :exporter exporter :processor :simple
+                           :metrics? true :runtime-metrics? false})
+        state {:phase :playing :shells []}]
+    (try
+      (is (identical? state
+                      (inst/around-fire
+                       {} [state :enemy [12 34 56] 16.0]
+                       #(identity state))))
+      (is (empty? (memory/spans exporter)))
+      (is (empty? (memory/records exporter)))
+      (is (empty? (memory/metrics exporter)))
+      (finally
+        (sdk/shutdown! handle)))))
 
 (deftest aspect-provider-covers-only-the-declared-roles
   (is (= #{:game/input :game/session :game/physics :game/render :game/frame

@@ -26,10 +26,10 @@ jobs:
       JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt-cache-v0.8.3
       JOLT_GITLIBS_DIR: ${{ github.workspace }}/.jolt-gitlibs-v0.8.3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Checkout aspect-capable Jolt compiler
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: casselc/jolt
           ref: 5d56b9e5d295fe0968df07e535c45353050611f7
@@ -39,7 +39,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout oscope receiver
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: chucklehead-dev/oscope
           ref: 4770e817ad3821c9d060d4fe4dc6ef1f32bf0420
@@ -47,7 +47,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout chDB native qualification
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: chucklehead-dev/jolt-chdb
           ref: 3ef8d97b62b467f1ad68f92b854498c124cb8811
@@ -58,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           install_dir="$RUNNER_TEMP/jolt-bin"
-          curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/v0.8.3/install \
+          curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/343f730922cf16fafe673b466cedcdcfe0596854/install \
             | bash -s -- --dir "$install_dir" --version 0.8.3
           echo "$install_dir" >> "$GITHUB_PATH"
 
