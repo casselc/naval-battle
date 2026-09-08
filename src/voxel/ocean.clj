@@ -137,7 +137,8 @@
   "The native particle sim (voxel.seac), wired by voxel.physics/init! when
   the C library loads. A map of
   {:init! (fn [cols extent bounds ambient? viscosity sparse-max])
-   :step! (fn [dt blasts hulls]) :particles (fn []) :time (fn [])}.
+   :step! (fn [dt blasts hulls]) :particles (fn []) :time (fn [])
+   :height (fn [x z])}.
 
   When it is present the game's particle state lives in flat native arrays
   and never crosses the FFI boundary per particle; the pure model in this
@@ -176,6 +177,37 @@
   (if (:native oc)
     ((:particles @sim-kernel))
     (:particles oc)))
+
+(defn surface-height
+  "Height of the water surface at (x, z): bilinear over the particle
+  lattice, so it is the simulated surface and not a nominal y = 0. Oceans
+  with no lattice (ad-hoc test clouds) read as flat."
+  [oc x z]
+  (if (:native oc)
+    ((:height @sim-kernel) x z)
+    (let [cols (:cols oc)
+          extent (:extent oc)
+          ps (:particles oc)]
+      (if (or (nil? cols) (nil? extent) (< cols 2))
+        0.0
+        (let [sp (/ (* 2.0 extent) (dec (double cols)))
+              top (- (dec (double cols)) 1e-9)
+              cl (fn [v] (max 0.0 (min top v)))
+              fi (cl (/ (+ x extent) sp))
+              fj (cl (/ (+ z extent) sp))
+              i (int fi) j (int fj)
+              u (- fi i) v (- fj j)
+              h (fn [a b] (:y (nth ps (+ (* a cols) b)) 0.0))]
+          (+ (* (- 1.0 u) (- 1.0 v) (h i j))
+             (* u (- 1.0 v) (h (inc i) j))
+             (* (- 1.0 u) v (h i (inc j)))
+             (* u v (h (inc i) (inc j)))))))))
+
+(defn surface-fn
+  "A closure reading this ocean's surface height, so voxel.physics can float
+  hulls on the water without knowing which side the particles live on."
+  [oc]
+  (fn [x z] (surface-height oc x z)))
 
 (defn total-circulation
   [oc]

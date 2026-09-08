@@ -169,6 +169,7 @@
 (ffi/defcfn sim-extent* "vsea_sim_extent" [] :double)
 (ffi/defcfn sim-time* "vsea_sim_time" [] :double)
 (ffi/defcfn sim-circulation* "vsea_sim_circulation" [] :double)
+(ffi/defcfn sim-height* "vsea_sim_height" [:double :double] :double)
 (ffi/defcfn sim-step* "vsea_sim_step"
   [:double :pointer :int64 :pointer :int64] :void)
 (ffi/defcfn sim-load* "vsea_sim_load"
@@ -212,6 +213,11 @@
 (defn sim-extent [] (sim-extent*))
 (defn sim-time [] (sim-time*))
 (defn sim-circulation [] (sim-circulation*))
+
+(defn sim-height
+  "Water surface height at (x, z), bilinear over the particle lattice."
+  [x z]
+  (sim-height* (double x) (double z)))
 
 (def ^:private MAX-COUPLINGS 64)
 

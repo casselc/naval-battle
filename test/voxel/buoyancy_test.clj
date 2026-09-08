@@ -202,3 +202,99 @@
           {:keys [force point]} (b/flood-force bod)]
       (is (near-v [0.0 (- (* b/WATER-DENSITY b/GRAVITY 3.0)) 0.0] force))
       (is (near -0.5 (second point)) "lowest cell centre of the j=-1 layer"))))
+
+
+;; --- floating on a tilted water plane ----------------------------------------
+;;
+;; The sea is a particle field, not a flat sheet at y = 0, so buoyancy is
+;; taken against the plane fitted to the water under a hull. The
+;; divergence-theorem identities need the cap to lie IN that plane, so the
+;; sums run in a frame whose up axis is the plane normal - volume is
+;; invariant under the rotation and the centroid comes back through it.
+
+(deftest fit-water-plane-recovers-the-sampled-surface
+  (testing "samples off an exact plane fit it back"
+    (let [a 0.12 b -0.07 c 0.4
+          pts (for [x [-6.0 -1.0 3.0 7.0] z [-5.0 0.0 4.0]]
+                [x (+ (* a x) (* b z) c) z])
+          [nx ny nz d] (b/fit-water-plane pts)]
+      ;; the plane is y = a x + b z + c, i.e. (-a, 1, -b).p = c up to scale
+      (let [l (Math/sqrt (+ (* a a) 1.0 (* b b)))]
+        (is (near (/ (- a) l) nx))
+        (is (near (/ 1.0 l) ny))
+        (is (near (/ (- b) l) nz))
+        (is (near (/ c l) d)))))
+  (testing "flat water gives the horizontal plane at its height"
+    (is (near-v [0.0 1.0 0.0 -1.25]
+                (b/fit-water-plane [[-3.0 -1.25 2.0] [4.0 -1.25 -1.0]
+                                    [0.0 -1.25 5.0] [1.0 -1.25 -6.0]]))))
+  (testing "a degenerate sample pattern falls back to horizontal"
+    ;; every sample at the same (x, z): no slope is recoverable
+    (is (near-v [0.0 1.0 0.0 2.0]
+                (b/fit-water-plane [[1.0 2.0 3.0] [1.0 2.0 3.0]])))))
+
+(deftest submerged-metrics-take-an-arbitrary-plane
+  (testing "a horizontal plane given as a plane matches the scalar form"
+    (let [bod (body (box-cells 3 3 3) [5.0 -0.5 7.0] [0.0 0.0 0.0 1.0])]
+      (is (= (b/submerged-metrics bod 0.0)
+             (b/submerged-metrics bod [0.0 1.0 0.0 0.0])))))
+  (testing "raising the plane submerges more of the hull"
+    (let [bod (body (box-cells 3 3 3) [0.0 0.0 0.0] [0.0 0.0 0.0 1.0])]
+      (is (near 13.5 (:volume (b/submerged-metrics bod [0.0 1.0 0.0 0.0]))))
+      (is (near 22.5 (:volume (b/submerged-metrics bod [0.0 1.0 0.0 1.0])))
+          "a metre of swell puts another layer under")))
+  (testing "tilting the plane is the same as tilting the hull the other way"
+    ;; a level box under water sloped by theta displaces exactly what a box
+    ;; rolled by theta displaces under level water
+    (let [theta 0.3
+          s (Math/sin theta) c (Math/cos theta)
+          ;; plane normal rolled about +z, through the origin
+          plane [(- s) c 0.0 0.0]
+          level (body (box-cells 3 3 3) [0.0 0.0 0.0] [0.0 0.0 0.0 1.0])
+          rolled (body (box-cells 3 3 3) [0.0 0.0 0.0]
+                       [0.0 0.0 (Math/sin (/ theta 2.0)) (Math/cos (/ theta 2.0))])
+          a (b/submerged-metrics level plane)
+          bb (b/submerged-metrics rolled 0.0)]
+      (is (near (:volume a) (:volume bb)))))
+  (testing "a fully submerged hull displaces its cell count under any plane"
+    (let [bod (body (box-cells 3 3 3) [0.0 -40.0 0.0] (b/yaw-quat 0.7))
+          n (Math/sqrt 3.0)
+          plane [(/ 1.0 n) (/ 1.0 n) (/ 1.0 n) 0.0]]
+      (is (near 27.0 (:volume (b/submerged-metrics bod plane))))
+      (is (near-v [0.0 -40.0 0.0] (:centroid (b/submerged-metrics bod plane))))))
+  (testing "a hull clear above a tilted plane displaces nothing"
+    (let [bod (body (box-cells 2 2 2) [0.0 60.0 0.0] [0.0 0.0 0.0 1.0])]
+      (is (zero? (:volume (b/submerged-metrics bod [-0.2 0.96 0.2 0.0])))))))
+
+(deftest buoyancy-on-a-slope-pushes-along-the-plane-normal
+  (testing "uplift stays vertical, but the centre of buoyancy shifts to the
+            deeper side, which is what rolls a hull on a wave"
+    ;; normal (-0.24, 0.97, 0) through the origin is the surface
+    ;; y = 0.247x - water piled up over +x, so that side of the hull carries
+    ;; more displaced volume and the CoB moves there
+    (let [bod (body (box-cells 3 3 3) [0.0 0.0 0.0] [0.0 0.0 0.0 1.0])
+          flat (b/buoyancy-force bod [0.0 1.0 0.0 0.0])
+          slope (b/buoyancy-force bod [-0.24 0.97 0.0 0.0])]
+      (is (near 0.0 (first (:point flat))) "level water: CoB amidships")
+      (is (pos? (first (:point slope)))
+          "sloped water: CoB toward the submerged side")
+      (is (near 0.0 (nth (:point slope) 2)) "no shift across an unsloped axis")
+      (is (> (:volume (b/submerged-metrics bod [-0.24 0.97 0.0 0.0]))
+             0.0))
+      (is (zero? (first (:force slope))) "the force itself is still straight up")
+      (is (pos? (second (:force slope)))))))
+
+(deftest flooding-and-breaches-follow-the-same-plane
+  (testing "a swell that lifts the water opens breaches that were dry"
+    (let [ship (docked-ship)
+          ;; knock out a cell in the j=1 layer, above the still waterline
+          breached (assoc (update ship :cells dissoc [0 1 0])
+                          :skin (b/skin-faces (:cells ship)))]
+      (is (zero? (b/openings-below breached [0.0 1.0 0.0 0.0]))
+          "still water: the hole is dry")
+      (is (pos? (b/openings-below breached [0.0 1.0 0.0 2.5]))
+          "a wave over the hole starts flooding her")))
+  (testing "flood weight uses the plane too"
+    (let [bod (assoc (docked-ship) :flood 3.0)
+          {:keys [force]} (b/flood-force bod [0.0 1.0 0.0 0.0])]
+      (is (near-v [0.0 (- (* b/WATER-DENSITY b/GRAVITY 3.0)) 0.0] force)))))

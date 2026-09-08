@@ -1,6 +1,7 @@
 (ns voxel.main
   "Window setup + the frame loop: input -> physics facts -> world -> render."
   (:require [voxel.camera :as cam]
+            [voxel.ocean :as sea]
             [voxel.raylib :as rl]
             [voxel.input :as input]
             [voxel.world :as w]
@@ -165,7 +166,8 @@
                       (phys/steer! enemy-body t r)))
                ;; physics: step Box3D, fold the facts into the battle
                tp0 (System/currentTimeMillis)
-               facts (phys/step! dt)
+               ;; hulls float on the particle surface, not on a nominal y=0
+               facts (phys/step! dt (sea/surface-fn (:ocean world)))
                _ (vswap! phys-work* + (- (System/currentTimeMillis) tp0))
                world (w/step-state world dt facts)
                ;; ships still without a physics body: frame zero, or a

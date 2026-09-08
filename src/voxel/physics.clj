@@ -62,7 +62,8 @@
             {:init! seac/sim-init!
              :step! seac/sim-step!
              :particles seac/sim-particles
-             :time seac/sim-time})
+             :time seac/sim-time
+             :height seac/sim-height})
     (catch Exception _ nil))
   (let [wrld (b3/create-world 0.0 (- w/GRAVITY) 0.0 1)]
     (vreset! world* wrld)
@@ -99,12 +100,13 @@
      (when vel
        (b3/set-velocity! id (vel 0) (vel 1) (vel 2)))
      (let [live (zipmap cells (repeat :cell))
-           {:keys [tris faces]} (buoy/surface-cache live anchor)]
+           {:keys [tris faces span]} (buoy/surface-cache live anchor)]
        (vswap! bodies* assoc id {:cells live
                                  :anchor anchor
                                  :skin (buoy/skin-faces live)
                                  :tris tris
                                  :faces faces
+                                 :span span
                                  :flood 0.0}))
      id)))
 
@@ -118,11 +120,13 @@
     (vswap! bodies* update-in [id]
             (fn [live]
               (let [live' (reduce dissoc (:cells live) cells)
-                    {:keys [tris faces]} (buoy/surface-cache live' (:anchor live))]
+                    {:keys [tris faces span]}
+                    (buoy/surface-cache live' (:anchor live))]
                 (-> live
                     (assoc :cells live')
                     (assoc :tris tris)
-                    (assoc :faces faces)))))))
+                    (assoc :faces faces)
+                    (assoc :span span)))))))
 
 (def ^:private ENGINE-FORCE 6000.0)  ; ~8 u/s flat out against 0.6 damping
 (def ^:private RUDDER-FORCE 1500.0)  ; bow/stern couple, ~25 deg/s of yaw
@@ -187,22 +191,52 @@
      :skin (:skin rec)
      :tris (:tris rec)
      :faces (:faces rec)
+     :span (:span rec)
      :flood (:flood rec)}))
+
+(def ^:private WATER-SAMPLES
+  "Where the water under a hull is read, as fractions of its own span along
+  [beam, keel]. Centre plus the four extremes: enough for the least-squares
+  fit to see the wave slope along the hull rather than just its heave."
+  [[0.0 0.0] [1.0 0.0] [-1.0 0.0] [0.0 1.0] [0.0 -1.0]])
+
+(defn- water-plane
+  "The plane of the sea under one hull, fitted to the particle surface at
+  WATER-SAMPLES points across its footprint. With no ocean wired (tests,
+  tools) this is the still waterline, which is what it always used to be."
+  [body water]
+  (if (nil? water)
+    buoy/WATER-LEVEL
+    (let [[ex _ ez] (or (:span body) [4.0 1.0 13.0])
+          quat (:quat body)
+          [px _ pz] (:pos body)]
+      (buoy/fit-water-plane
+       (mapv (fn [[fi fk]]
+               (let [[dx _ dz] (buoy/q-rotate quat [(* fi ex) 0.0 (* fk ez)])
+                     x (+ px dx)
+                     z (+ pz dz)]
+                 [x (water x z) z]))
+             WATER-SAMPLES)))))
 
 (defn- drive-floatation!
   "One body's water interaction for this step: buoyant uplift and flood weight
   applied as forces (waking the body - a settled hull must still ride every
-  wave), and flood accumulated through whatever breaches are submerged."
-  [id rec dt]
-  (let [body (pose-record id rec)]
-    (doseq [{:keys [force point]} (keep #(% body) [buoy/buoyancy-force
-                                                    buoy/flood-force])]
+  wave), and flood accumulated through whatever breaches are submerged.
+
+  All three read the same plane, fitted to the particle surface under this
+  hull, so a ship heaves on the swell, the slope of the wave under her rolls
+  and pitches her, and a sea running over a breach floods her faster."
+  [id rec dt water]
+  (let [body (pose-record id rec)
+        plane (water-plane body water)]
+    (doseq [{:keys [force point]} (keep #(% body plane) [buoy/buoyancy-force
+                                                         buoy/flood-force])]
       (b3/apply-force! id
                        (force 0) (force 1) (force 2)
                        (point 0) (point 1) (point 2)
                        true))
     (vswap! bodies* assoc-in [id :flood]
-            (:flood (buoy/step-flooding body dt)))))
+            (:flood (buoy/step-flooding body dt plane)))))
 
 (defn- body-fact
   [id]
@@ -217,10 +251,12 @@
 
 (defn step!
   "Advance physics by dt seconds - floatation forces first, then the solver -
-  and report one fact per live body."
-  [dt]
+  and report one fact per live body. `water` is (fn [x z] -> surface height)
+  from voxel.ocean/surface-fn; with none the sea is the still waterline."
+  ([dt] (step! dt nil))
+  ([dt water]
   (doseq [[id rec] @bodies*]
-    (drive-floatation! id rec dt))
+    (drive-floatation! id rec dt water))
   (b3/step! @world* dt SUBSTEPS)
   {:ball (when-let [id @ball*] (body-fact id))
-   :bodies (mapv body-fact (keys @bodies*))})
+   :bodies (mapv body-fact (keys @bodies*))}))

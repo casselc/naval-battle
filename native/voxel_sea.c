@@ -625,6 +625,30 @@ void vsea_sim_read(double *x, double *z, double *y,
 	}
 }
 
+// vsea_sim_height(x, z): the water surface height, bilinear over the
+// particle lattice. Indexed by the rest lattice - particles advect at most
+// half a tile, so it is still the right cell - and clamped at the edges, so
+// a hull that sails past the sheet reads the nearest water rather than
+// falling through a hole.
+double vsea_sim_height(double x, double z)
+{
+	if (!sim.ready)
+		return 0.0;
+	int cols = sim.cols;
+	double top = (double)(cols - 1) - 1e-9;
+	double fi = (x + sim.extent) / sim.spacing;
+	double fj = (z + sim.extent) / sim.spacing;
+	if (fi < 0.0) fi = 0.0; else if (fi > top) fi = top;
+	if (fj < 0.0) fj = 0.0; else if (fj > top) fj = top;
+	int i = (int)fi, j = (int)fj;
+	double u = fi - i, v = fj - j;
+	const double *y = sim.y;
+	return (1.0 - u) * (1.0 - v) * y[i * cols + j]
+	     + u * (1.0 - v) * y[(i + 1) * cols + j]
+	     + (1.0 - u) * v * y[i * cols + j + 1]
+	     + u * v * y[(i + 1) * cols + j + 1];
+}
+
 double vsea_sim_circulation(void)
 {
 	double s = 0.0;

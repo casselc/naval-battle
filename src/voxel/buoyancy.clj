@@ -3,12 +3,22 @@
   surface mesh at the water plane and read displaced volume and centre of
   buoyancy straight off the clipped triangles.
 
-  Why clipping without capping is exact: any triangle lying IN the plane
-  y = water-level contributes exactly zero to the divergence-theorem volume
-  (its normal is vertical, and all its vertices share one y) and to every
-  axis moment (w = 0 on the two horizontal axes; a = b = c = 0 on the
-  vertical one). So the open mesh left by dropping the above-water triangles
-  has the same volume and moments as the properly capped solid.
+  The water plane is [nx ny nz d] in world coordinates - a point p is under
+  water when n.p <= d - because the sea is a particle field, not a sheet at
+  y = 0. voxel.physics fits it to the particles under each hull every step,
+  so a ship heaves on the swell and the slope of the wave under it rights or
+  rolls her. A bare number still works and means the horizontal plane at
+  that height.
+
+  Why clipping without capping is exact: any triangle lying IN the water
+  plane contributes exactly zero to the divergence-theorem volume (its
+  normal is the plane normal, and all its vertices share one height) and to
+  every axis moment (w = 0 on the two in-plane axes; a = b = c = 0 on the
+  one along the normal). So the open mesh left by dropping the above-water
+  triangles has the same volume and moments as the properly capped solid.
+  That argument needs the cap to lie in the coordinate plane, so the sums
+  run in a frame whose up axis IS the water plane normal: volume is
+  invariant under that rotation and the centroid comes back through it.
 
   Flooding: a body remembers its spawn-time exterior skin. Exposed faces
   that are NOT skin are fracture faces from destroyed cells; the ones below
@@ -55,6 +65,66 @@
   "World centre of cell [i j k] under the body's pose."
   [body [i j k]]
   (body-point->world body [(+ i 0.5) (+ j 0.5) (+ k 0.5)]))
+
+;; --- the water plane ---------------------------------------------------------------
+
+(defn- cross
+  [[ax ay az] [bx by bz]]
+  [(- (* ay bz) (* az by))
+   (- (* az bx) (* ax bz))
+   (- (* ax by) (* ay bx))])
+
+(defn- dot3 [a b] (+ (* (a 0) (b 0)) (* (a 1) (b 1)) (* (a 2) (b 2))))
+
+(defn as-plane
+  "The water plane as [nx ny nz d] with n a unit normal pointing out of the
+  water: a point p is submerged when n.p <= d. A bare number is the
+  horizontal plane at that height."
+  [p]
+  (if (number? p) [0.0 1.0 0.0 (double p)] p))
+
+(defn fit-water-plane
+  "Least-squares plane through sampled surface points [[x y z] ...], as
+  [nx ny nz d]. Fits y = a x + b z + c about the sample centroid, which
+  keeps the 2x2 normal equations well conditioned; a degenerate pattern (all
+  samples over one spot, or along a single line) has no recoverable slope
+  and falls back to the horizontal plane at the mean height."
+  [pts]
+  (let [pts (vec pts)
+        n (count pts)
+        inv (/ 1.0 (double (max 1 n)))
+        mx (* inv (reduce + (map #(% 0) pts)))
+        my (* inv (reduce + (map #(% 1) pts)))
+        mz (* inv (reduce + (map #(% 2) pts)))
+        [sxx sxz szz sxy szy]
+        (reduce (fn [[axx axz azz axy azy] p]
+                  (let [x (- (p 0) mx) y (- (p 1) my) z (- (p 2) mz)]
+                    [(+ axx (* x x)) (+ axz (* x z)) (+ azz (* z z))
+                     (+ axy (* x y)) (+ azy (* z y))]))
+                [0.0 0.0 0.0 0.0 0.0] pts)
+        det (- (* sxx szz) (* sxz sxz))
+        [a b] (if (< (Math/abs det) 1e-12)
+                [0.0 0.0]
+                [(/ (- (* sxy szz) (* szy sxz)) det)
+                 (/ (- (* szy sxx) (* sxy sxz)) det)])
+        c (- my (* a mx) (* b mz))
+        l (Math/sqrt (+ (* a a) 1.0 (* b b)))]
+    [(/ (- a) l) (/ 1.0 l) (/ (- b) l) (/ c l)]))
+
+(defn- plane-frame
+  "Rows of a rotation taking the water plane normal n onto +y, so the
+  clipped cap lies in the frame's y = 0 plane. Identity when the water is
+  already level, which keeps flat-sea results bit-for-bit unchanged."
+  [[nx ny nz :as n]]
+  (if (> ny 0.999999)
+    [[1.0 0.0 0.0] [0.0 1.0 0.0] [0.0 0.0 1.0]]
+    (let [a (if (< (Math/abs ny) 0.9) [0.0 1.0 0.0] [1.0 0.0 0.0])
+          e (cross a n)
+          l (Math/sqrt (dot3 e e))
+          e1 (mapv #(/ % l) e)]
+      ;; rows [e1 n e1 x n]: orthonormal AND right-handed, so the
+      ;; divergence sums keep their sign
+      [e1 (vec n) (cross e1 n)])))
 
 ;; --- clipping at the water plane --------------------------------------------------
 
@@ -103,10 +173,11 @@
   [nx ny nz d] with a body point u submerged iff n.u <= d. Rigid transforms
   preserve volume, so clipping runs on the static local mesh and only the
   surviving triangles rotate."
-  [{:keys [pos quat]} water-y]
-  (let [[qx qy qz qw] quat
-        n (q-rotate [(- qx) (- qy) (- qz) qw] [0.0 1.0 0.0])]
-    [(n 0) (n 1) (n 2) (- water-y (pos 1))]))
+  [{:keys [pos quat]} water]
+  (let [[wx wy wz d] (as-plane water)
+        [qx qy qz qw] quat
+        n (q-rotate [(- qx) (- qy) (- qz) qw] [wx wy wz])]
+    [(n 0) (n 1) (n 2) (- d (+ (* wx (pos 0)) (* wy (pos 1)) (* wz (pos 2))))]))
 
 (defn- quat-matrix
   "The 3x3 rotation matrix of [x y z w] - rows map local u to world axes."
@@ -128,12 +199,15 @@
   only the survivors, and shift the plane to y = 0 before summing so the
   open-mesh identities hold exactly."
   ([body] (submerged-metrics body WATER-LEVEL))
-  ([{:keys [pos quat anchor cells] :as body} water-y]
+  ([{:keys [pos quat anchor cells] :as body} water]
    (let [us (or (:tris body)
                 (mapv (fn [t] (mapv #(mapv - % anchor) t))
                       (mesh/surface-triangles cells)))
-         [nx ny nz d] (local-water-plane body water-y)
-         dy (- water-y (pos 1))
+         [wx wy wz wd] (as-plane water)
+         [nx ny nz d] (local-water-plane body water)
+         ;; signed height of the body origin above the water plane, so the
+         ;; cap lands on y = 0 in the plane frame
+         dy (- wd (+ (* wx (pos 0)) (* wy (pos 1)) (* wz (pos 2))))
          s (fn [u] (+ (* nx (u 0)) (* ny (u 1)) (* nz (u 2))))
          clip (fn [[a b c :as t]]
                 (let [sa (s a) sb (s b) sc (s c)
@@ -161,12 +235,19 @@
                         [[b (lerp b c sb sc) (lerp b a sb sa)]]
                         [[c (lerp c a sc sa) (lerp c b sc sb)]]))
                     :else nil)))
-         [[r00 r01 r02] [r10 r11 r12] [r20 r21 r22]] (quat-matrix quat)
+         ;; body -> world orientation, then world -> the frame whose up axis
+         ;; is the water plane normal (identity on level water)
+         [q0 q1 q2] (plane-frame [wx wy wz])
+         [[m00 m01 m02] [m10 m11 m12] [m20 m21 m22]]
+         (let [r (quat-matrix quat)
+               col (fn [j] [((r 0) j) ((r 1) j) ((r 2) j)])]
+           (mapv (fn [q] (mapv (fn [j] (dot3 q (col j))) [0 1 2]))
+                 [q0 q1 q2]))
          xf (fn [u]
               (let [ux (u 0) uy (u 1) uz (u 2)]
-                [(+ (* r00 ux) (* r01 uy) (* r02 uz))
-                 (- (+ (* r10 ux) (* r11 uy) (* r12 uz)) dy)
-                 (+ (* r20 ux) (* r21 uy) (* r22 uz))]))
+                [(+ (* m00 ux) (* m01 uy) (* m02 uz))
+                 (- (+ (* m10 ux) (* m11 uy) (* m12 uz)) dy)
+                 (+ (* m20 ux) (* m21 uy) (* m22 uz))]))
          ;; one kept triangle -> [vol6 mx my mz]; coordinates are already in
          ;; the world-oriented y=0-plane frame, so the divergence sums are the
          ;; exact ones (mesh-volume + mesh-centroid fused into one pass)
@@ -191,16 +272,23 @@
          v (/ vol6 6.0)]
      (if (< (Math/abs v) 1e-9)
        {:volume 0.0 :centroid nil}
-       {:volume v
-        :centroid (mapv + pos [(/ mx v) (+ (/ my v) dy) (/ mz v)])}))))
+       ;; the centroid comes back out of the plane frame (transpose of the
+       ;; rotation, i.e. its rows read as columns) and then off the origin
+       (let [c [(/ mx v) (+ (/ my v) dy) (/ mz v)]]
+         {:volume v
+          :centroid (mapv (fn [j] (+ (pos j)
+                                     (* (q0 j) (c 0))
+                                     (* (q1 j) (c 1))
+                                     (* (q2 j) (c 2))))
+                          [0 1 2])})))))
 
 (defn buoyancy-force
   "Archimedes: rho g V displaced, straight up, applied at the centre of
   buoyancy so the offset from the centre of mass rights the ship. nil when
   nothing is submerged."
   ([body] (buoyancy-force body WATER-LEVEL))
-  ([body water-y]
-   (let [{:keys [volume centroid]} (submerged-metrics body water-y)]
+  ([body water]
+   (let [{:keys [volume centroid]} (submerged-metrics body water)]
      (when (and (pos? volume) centroid)
        {:force [0.0 (* WATER-DENSITY GRAVITY volume) 0.0]
         :point centroid}))))
@@ -238,15 +326,30 @@
   {:center (face-center body [cell dir])
    :normal (q-rotate (:quat body) (vec dir))})
 
+(defn hull-span
+  "Half-extents [ex ey ez] of the cell set about the anchor - the hull's
+  own footprint, which is where voxel.physics samples the water under it."
+  [cells anchor]
+  (let [ks (keys cells)]
+    (if (empty? ks)
+      [0.5 0.5 0.5]
+      (mapv (fn [axis]
+              (let [a (double (anchor axis))]
+                (+ 0.5 (reduce (fn [m c]
+                                 (max m (Math/abs (- (+ (c axis) 0.5) a))))
+                               0.0 ks))))
+            [0 1 2]))))
+
 (defn surface-cache
   "Static per-hull data for the floatation hot path: the closed surface mesh
-  as anchor-relative triangles and the exposed faces, both recomputed only
-  when damage changes the cells rather than every frame."
+  as anchor-relative triangles, the exposed faces, and the hull's footprint -
+  all recomputed only when damage changes the cells rather than every frame."
   [cells anchor]
   {:tris (mapv (fn [[a b c]]
                  [(mapv - a anchor) (mapv - b anchor) (mapv - c anchor)])
                (mesh/surface-triangles cells))
-   :faces (surface-faces cells)})
+   :faces (surface-faces cells)
+   :span (hull-span cells anchor)})
 
 (defn openings-below
   "Count of intake openings: exposed fracture faces (not original skin) whose
@@ -257,11 +360,11 @@
   plane height at a face centre and the world normal's y component are each
   one dot product on the cached face list."
   ([body] (openings-below body WATER-LEVEL))
-  ([{:keys [skin cells faces anchor] :as body} water-y]
+  ([{:keys [skin cells faces anchor] :as body} water]
     (if (nil? skin)
       0
       (let [breaches (clojure.set/difference (or faces (surface-faces cells)) skin)
-            [nx ny nz d] (local-water-plane body water-y)
+            [nx ny nz d] (local-water-plane body water)
             [ax ay az] anchor]
         (count (filter (fn [[cell dir]]
                         (let [cu [(+ (- (cell 0) ax) 0.5 (* 0.5 (dir 0)))
@@ -275,9 +378,9 @@
   "Accumulate ingressed water for dt seconds: FLOOD-RATE per submerged
   opening, capped at one unit per cell of hull."
   ([body dt] (step-flooding body dt WATER-LEVEL))
-  ([body dt water-y]
+  ([body dt water]
    (let [cap (count (:cells body))
-         rate (* FLOOD-RATE (openings-below body water-y))]
+         rate (* FLOOD-RATE (openings-below body water))]
      (assoc body :flood (min (double cap)
                              (+ (or (:flood body) 0.0) (* rate dt)))))))
 
@@ -286,11 +389,12 @@
   lowest cell centre so the ship trims bow/stern and lists toward the hole.
   nil when the hull is dry. The lowest world-y cell minimises n.u against
   the local water plane - one dot product per cell, no rotations."
-  [body]
+  ([body] (flood-force body WATER-LEVEL))
+  ([body water]
   (let [f (or (:flood body) 0.0)]
     (if (<= f 0.0)
       nil
-      (let [[nx ny nz] (local-water-plane body WATER-LEVEL)
+      (let [[nx ny nz] (local-water-plane body water)
             [ax ay az] (:anchor body)
             depth (fn [c] (+ (* nx (- (+ (c 0) 0.5) ax))
                              (* ny (- (+ (c 1) 0.5) ay))
@@ -299,4 +403,4 @@
                            (keys (:cells body)))
             p (cell-center->world body lowest)]
         {:force [0.0 (- (* WATER-DENSITY GRAVITY f)) 0.0]
-         :point p}))))
+         :point p})))))
