@@ -4,6 +4,7 @@ vendor/
 # built shim (rebuilt with `jolt native`)
 native/*.dylib
 native/*.so
+target/
 
 # tool caches
 .jolt/
