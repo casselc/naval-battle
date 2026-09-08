@@ -38,6 +38,30 @@
                   (app (assoc request :uri "/healthz"
                               :headers {"Host" "game.example"}))))))))
 
+(deftest viewer-stop-remains-retryable-after-a-transient-failure
+  (let [attempts (atom 0)
+        source {:load-command
+                (fn [_ selection] (sample/screen-for-selection selection))
+                :export-admission {:capacity 1 :active (atom 0)}}]
+    (with-redefs [jolt.http.server/run-server
+                  (fn [& _] {:port 4320})
+                  jolt.http.server/stop-server
+                  (fn [_]
+                    (when (= 1 (swap! attempts inc))
+                      (throw (ex-info "transient listener stop failure" {})))
+                    true)]
+      (let [runtime (viewer/start! {:source source
+                                    :connection ::connection
+                                    :host "127.0.0.1"
+                                    :port 4320})]
+        (is (thrown? Exception (viewer/stop! runtime)))
+        (is (false? @(:stopped? runtime)))
+        (is (true? (viewer/stop! runtime)))
+        (is (true? @(:stopped? runtime)))
+        (is (= 2 @attempts))
+        (is (true? (viewer/stop! runtime)))
+        (is (= 2 @attempts))))))
+
 (deftest composition-validates-before-effects-and-stops-viewer-first
   (let [events (atom [])
         embedded-runtime {:source ::source :connection ::connection}
@@ -109,6 +133,36 @@
       (is (thrown? Exception (runtime/start! {})))
       (is (= [:embedded-start :hud-start :viewer-fail :hud-stop :embedded-stop]
              @events)))))
+
+(deftest failed-start-surfaces-an-incomplete-embedded-rollback
+  (let [startup-error (ex-info "bind failed" {:stage :viewer})
+        persistence-error (ex-info "checkpoint failed" {:stage :persistence})
+        stop-attempts (atom 0)
+        embedded-runtime {:source ::source :connection ::connection}]
+    (with-redefs [jdbc.chdb.durable.local-posix/local-backend (constantly ::backend)
+                  embedded/start! (constantly embedded-runtime)
+                  hud/start! (fn [_ _] ::hud)
+                  hud/stop! (constantly true)
+                  viewer/start! (fn [_] (throw startup-error))
+                  embedded/stop!
+                  (fn [_]
+                    (swap! stop-attempts inc)
+                    {:status :closing :phase :persisting
+                     :errors [persistence-error]})]
+      (try
+        (runtime/start! {})
+        (is false "expected startup rollback failure")
+        (catch Throwable error
+          (let [data (ex-data error)
+                cleanup (first (:cleanup-errors data))]
+            (is (= ::runtime/startup-and-cleanup-failed (:type data)))
+            (is (identical? startup-error (:startup-error data)))
+            (is (= ::runtime/startup-rollback-incomplete
+                   (:type (ex-data cleanup))))
+            (is (identical? persistence-error
+                            (first (get-in (ex-data cleanup)
+                                           [:result :errors])))))))
+      (is (= 4 @stop-attempts)))))
 
 (deftest hud-queries-only-on-its-worker-and-snapshot-is-memory-only
   (let [calls (atom 0)

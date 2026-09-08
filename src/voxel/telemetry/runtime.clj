@@ -28,6 +28,12 @@
         (< attempt 4) (recur (inc attempt))
         :else result))))
 
+(defn- record-cleanup-error! [errors cleanup]
+  (try
+    (cleanup)
+    (catch Throwable error
+      (swap! errors conj error))))
+
 (defn- stop-lifecycle! [{:keys [viewer hud embedded state lock]}]
   (locking lock
     (if (= :closed (:phase @state))
@@ -86,11 +92,28 @@
                        :lock (Object.)}]
         (assoc lifecycle :stop! #(stop-lifecycle! lifecycle)))
       (catch Throwable error
-        (when-let [sampler @hud*]
-          (try (hud/stop! sampler) (catch Throwable _ nil)))
-        (when-let [runtime @embedded*]
-          (try (stop-embedded-until-closed! runtime) (catch Throwable _ nil)))
-        (throw error)))))
+        (let [cleanup-errors (atom [])]
+          (when-let [sampler @hud*]
+            (record-cleanup-error! cleanup-errors #(hud/stop! sampler)))
+          (when-let [runtime @embedded*]
+            (record-cleanup-error!
+             cleanup-errors
+             #(let [result (stop-embedded-until-closed! runtime)]
+                (when-not (= :closed (:status result))
+                  (throw
+                   (ex-info "embedded telemetry startup rollback remained incomplete"
+                            {:voxel.telemetry/error true
+                             :type ::startup-rollback-incomplete
+                             :result result}))))))
+          (if (seq @cleanup-errors)
+            (throw
+             (ex-info "naval-battle telemetry startup and rollback failed"
+                      {:voxel.telemetry/error true
+                       :type ::startup-and-cleanup-failed
+                       :startup-error error
+                       :cleanup-errors @cleanup-errors}
+                      error))
+            (throw error)))))))
 
 (defn force-flush! [lifecycle]
   (embedded/force-flush! (:embedded lifecycle)))

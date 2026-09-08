@@ -91,7 +91,8 @@
               :editor-handler editor})
         server (http/run-server app :port port :server-name host
                                 :reuse-address? true :pool-size 2)
-        stopped? (atom false)]
+        stopped? (atom false)
+        stop-lock (Object.)]
     (reset! authority* (str host ":" (:port server)))
     {:host host
      :port (:port server)
@@ -99,8 +100,13 @@
      :handler app
      :server server
      :stopped? stopped?
-     :stop! #(when (compare-and-set! stopped? false true)
-               (http/stop-server server))}))
+     :stop! #(locking stop-lock
+               (when-not @stopped?
+                 ;; Publish completion only after the listener really stopped.
+                 ;; A transient stop failure must remain retryable so callers do
+                 ;; not close the source beneath a still-live query listener.
+                 (http/stop-server server)
+                 (reset! stopped? true)))}))
 
 (defn stop! [viewer]
   (when-let [stop-fn (:stop! viewer)] (stop-fn))
