@@ -12,10 +12,10 @@
    :hud-interval-ms 1000
    :checkpoint-on-close? true
    :sdk-options {:service-name "naval-battle"
-                 ;; Sparse lifecycle signals should reach the adjacent viewer
-                 ;; immediately. Metrics refresh at the HUD cadence instead of
-                 ;; the SDK's one-minute default.
-                 :processor :simple
+                 ;; Keep Durable insertion off gameplay threads while making
+                 ;; the adjacent viewer useful within one HUD refresh.
+                 :processor :batch
+                 :schedule-delay-ms 1000
                  :metric-interval-ms 1000
                  :metrics? true
                  :runtime-metrics? true
