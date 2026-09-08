@@ -98,3 +98,40 @@
                               tris)]
                 (/ m v)))
             [:x :y :z]))))
+
+;; --- collision decomposition ---------------------------------------------
+
+(defn solid-boxes
+  "Greedy axis-aligned box decomposition of a voxel set, as
+  [[i0 j0 k0 i1 j1 k1] ...] with the maximum corner exclusive. The boxes tile
+  the set exactly - no gaps, no overlaps - so a physics body built from them
+  has the mass and the shape of the voxels themselves.
+
+  A collision solid per voxel is what a coarse ship could get away with. It
+  does not survive raising the resolution: the same hull at half-size voxels
+  is eight times the cells, and no solver wants tens of thousands of shapes
+  for two ships. Merged, a hull is a few hundred boxes at any resolution,
+  because the count follows the hull's shape rather than its cell count."
+  [voxels]
+  (let [order (vec (sort (keys voxels)))]
+    (loop [idx 0 left (set order) boxes []]
+      (if (>= idx (count order))
+        boxes
+        (let [[i0 j0 k0 :as c] (order idx)]
+          (if-not (contains? left c)
+            (recur (inc idx) left boxes)
+            (let [run? (fn [is js k]
+                         (every? (fn [i]
+                                   (every? #(contains? left [i % k]) js))
+                                 is))
+                  i1 (loop [i (inc i0)]
+                       (if (contains? left [i j0 k0]) (recur (inc i)) i))
+                  is (range i0 i1)
+                  j1 (loop [j (inc j0)]
+                       (if (run? is [j] k0) (recur (inc j)) j))
+                  js (range j0 j1)
+                  k1 (loop [k (inc k0)]
+                       (if (run? is js k) (recur (inc k)) k))
+                  taken (for [i is j js k (range k0 k1)] [i j k])]
+              (recur (inc idx) (reduce disj left taken)
+                     (conj boxes [i0 j0 k0 i1 j1 k1])))))))))

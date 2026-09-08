@@ -92,7 +92,8 @@
   []
   (mesh-free*))
 
-(ffi/defcfn ship-init* "vsea_ship_init" [:pointer :pointer :int64] :int64)
+(ffi/defcfn ship-init* "vsea_ship_init"
+  [:pointer :pointer :int64 :double] :int64)
 (ffi/defcfn ship-draw* "vsea_ship_draw"
   [:int64 :pointer :pointer :pointer :pointer :pointer] :void)
 (ffi/defcfn ship-free* "vsea_ship_free" [:int64] :void)
@@ -131,8 +132,9 @@
 
 (defn ship-init!
   "Build a hull's static mesh from its exposed faces (seq of [[i j k] dir])
-  with a packed base colour per face. Returns the hull id (or -1)."
-  [faces colors]
+  with a packed base colour per face; voxel is how many world units a cell
+  edge is. Returns the hull id (or -1)."
+  [faces colors voxel]
   (let [n (count faces)]
     (ensure-ship-buffers! n)
     (let [b @ship-bufs]
@@ -144,7 +146,7 @@
           (ffi/write (:cells b) :int64 (long k) (+ 16 (* 32 f)))
           (ffi/write (:cells b) :int64 (long (dir-index dir)) (+ 24 (* 32 f))))
         (write-color!-at (:colors b) (nth colors f) (* 4 f)))
-      (ship-init* (:cells b) (:colors b) (long n)))))
+      (ship-init* (:cells b) (:colors b) (long n) (double voxel)))))
 
 (defn ship-draw!
   "Draw hull id at its physics transform: pos/quat/anchor are the ship's,

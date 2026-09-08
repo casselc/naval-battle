@@ -1,7 +1,8 @@
 (ns voxel.buoyancy-test
   (:require [clojure.test :refer [deftest is testing]]
             [voxel.mesh :as mesh]
-            [voxel.buoyancy :as b]))
+            [voxel.buoyancy :as b]
+            [voxel.hullc :as hullc]))
 
 (def ^:private near (fn [x y] (< (Math/abs (- (double x) (double y))) 1e-9)))
 (def ^:private near-v (fn [u v] (every? #(< (Math/abs %) 1e-9) (map - (map double u) (map double v)))))
@@ -176,14 +177,44 @@
                 (update :cells dissoc [0 -1 0])
                 (assoc :skin (b/skin-faces (:cells (docked-ship)))
                        :flood 1.0))]
-    (testing "rate is openings x FLOOD-RATE x dt"
-      (is (near (+ 1.0 (* 2 b/FLOOD-RATE 0.5))
+    (testing "rate is FLOOD-RATE x the intake coefficient x dt"
+      (is (near (+ 1.0 (* b/FLOOD-RATE (b/intake-below bod) 0.5))
                 (:flood (b/step-flooding bod 0.5)))))
-    (testing "flooding stops at hull capacity (one unit per cell)"
+    (testing "flooding stops at the hull's own volume"
       (is (near 63.0 (:flood (b/step-flooding (assoc bod :flood 62.9) 10.0))))))
   (testing "an intact hull takes on nothing"
     (let [bod (assoc (docked-ship) :skin (b/skin-faces (:cells (docked-ship))) :flood 0.0)]
       (is (zero? (:flood (b/step-flooding bod 2.0)))))))
+
+(deftest water-comes-in-faster-through-a-deeper-hole
+  (testing "the head above a hole sets the speed through it, so a scratch at
+            the waterline is not as deadly as a hole under the bilge - which
+            is what let a single shell put a ship down"
+    (let [ship (docked-ship)
+          breached (assoc (update ship :cells dissoc [0 -1 0])
+                          :skin (b/skin-faces (:cells ship)))
+          ;; same hull, same hole, the sea standing progressively higher
+          intake (fn [w] (b/intake-below breached [0.0 1.0 0.0 w]))]
+      (is (< (intake 0.0) (intake 1.0) (intake 3.0))
+          "deeper under, faster in")
+      (is (< (intake 0.0) (* 0.7 (intake 2.0)))
+          "and the difference is not marginal")))
+  (testing "a hole clear of the water lets nothing in at all"
+    (let [ship (docked-ship)
+          high (assoc (update ship :cells dissoc [0 1 0])
+                      :skin (b/skin-faces (:cells ship)))]
+      (is (zero? (b/intake-below high [0.0 1.0 0.0 0.0])))
+      (is (pos? (b/intake-below high [0.0 1.0 0.0 2.5]))
+          "until a wave puts it under")))
+  (testing "the intake is an area, so it does not depend on how finely the
+            hull happens to be cut up"
+    ;; the same hull at half the voxel size: four times the faces, each a
+    ;; quarter the area
+    (let [coarse (assoc (update (docked-ship) :cells dissoc [0 -1 0])
+                        :skin (b/skin-faces (:cells (docked-ship))))]
+      (is (pos? (b/intake-below coarse)))
+      (is (< (b/intake-below (assoc coarse :voxel 1.0))
+             (* 1.01 (b/intake-below coarse)))))))
 
 ;; --- forces ------------------------------------------------------------------------
 
@@ -197,11 +228,20 @@
     (is (nil? (b/buoyancy-force (body (box-cells 1 1 1) [0.0 9.0 0.0] [0.0 0.0 0.0 1.0]))))))
 
 (deftest flood-weight-pushes-down-at-the-low-point
-  (testing "flooded water weighs rho g flood, applied at the lowest cell centre"
-    (let [bod (assoc (docked-ship) :flood 3.0)
+  (testing "flooded water weighs rho g flood, applied at the hull's low point"
+    ;; the deepest corner of her own bounding box under this pose - which
+    ;; cell is lowest changes with every wave, and finding it is a pass over
+    ;; the whole hull that a fine voxel grid cannot afford per frame
+    (let [ship (docked-ship)
+          bod (merge ship
+                     (b/surface-cache (:cells ship) (:anchor ship))
+                     {:flood 3.0})
           {:keys [force point]} (b/flood-force bod)]
       (is (near-v [0.0 (- (* b/WATER-DENSITY b/GRAVITY 3.0)) 0.0] force))
-      (is (near -0.5 (second point)) "lowest cell centre of the j=-1 layer"))))
+      (is (near -1.0 (second point))
+          "the bottom of the j=-1 layer, where the water in her has run to")))
+  (testing "a dry hull carries no flood weight"
+    (is (nil? (b/flood-force (docked-ship))))))
 
 
 ;; --- floating on a tilted water plane ----------------------------------------
@@ -347,3 +387,70 @@
     (is (near 1.0 (:volume (b/submerged-metrics
                             (body #{[0 0 0]} [0.0 -20.0 0.0]
                                   [0.0 0.0 0.0 1.0])))))))
+
+;; --- the native solve is the same solve --------------------------------------
+;;
+;; The per-step floatation solve runs in C so a hull can be made of as many
+;; voxels as it looks like it should be. Everything above is the reference for
+;; it, and these hold the two together - if they drift, the readable version
+;; stops describing what floats the ships.
+
+(defn- native-hull
+  "Load cells into the kernel and return [hull-id info]."
+  [cells anchor voxel]
+  [0 (hullc/set-hull! 0 (keys cells) anchor voxel)])
+
+(deftest the-native-solve-matches-the-reference
+  (doseq [voxel [1.0 0.5]]
+    (testing (str "at " voxel " units per cell")
+      (let [cells (zipmap (for [i (range 5) j (range 4) k (range 9)] [i j k])
+                          (repeat :hull))
+            anchor [2.5 0.0 4.5]
+            [hull info] (native-hull cells anchor voxel)
+            cache (b/surface-cache cells anchor voxel)]
+        (testing "same exposed faces, footprint and balance point"
+          (is (= (set (:faces info)) (:faces cache)))
+          (is (near-v (:span info) (:span cache)))
+          (is (near-v (:com info) (:com cache))))
+        (testing "same displaced volume and centre of buoyancy, at any pose
+                  and against any water plane"
+          (doseq [pos [[0.0 -1.0 0.0] [4.0 -0.3 -7.0] [0.0 -30.0 0.0]
+                       [0.0 30.0 0.0]]
+                  quat [[0.0 0.0 0.0 1.0] (b/yaw-quat 0.9) (b/pitch-quat 0.4)]
+                  plane [[0.0 1.0 0.0 0.0] [-0.2 0.96 0.18 0.5]]]
+            (let [body (merge {:cells cells :anchor anchor :pos pos :quat quat}
+                              cache)
+                  want (b/submerged-metrics body plane)
+                  got (hullc/metrics hull pos quat plane)]
+              (is (< (Math/abs (- (:volume want) (:volume got))) 1e-9)
+                  (str "volume at " pos " " quat " " plane))
+              (when (:centroid want)
+                (is (near-v (:centroid want) (:centroid got))
+                    (str "centre of buoyancy at " pos))))))
+        (hullc/free-hull! hull)))))
+
+(deftest a-finer-hull-is-the-same-ship
+  (testing "halving the voxel size gives eight times the cells and the same
+            vessel - which is the whole point of a volume solve that is
+            linear in surface triangles"
+    (let [coarse (zipmap (for [i (range 4) j (range 4) k (range 8)] [i j k])
+                         (repeat :hull))
+          fine (zipmap (for [i (range 8) j (range 8) k (range 16)] [i j k])
+                       (repeat :hull))
+          a-c [2.0 0.0 4.0]
+          a-f [4.0 0.0 8.0]
+          pos [0.0 -1.0 0.0]
+          quat (b/yaw-quat 0.6)
+          plane [0.0 1.0 0.0 0.0]
+          m (fn [cells anchor voxel]
+              (b/submerged-metrics
+               (merge {:cells cells :anchor anchor :pos pos :quat quat}
+                      (b/surface-cache cells anchor voxel))
+               plane))
+          c (m coarse a-c 1.0)
+          f (m fine a-f 0.5)]
+      (is (= (* 8 (count coarse)) (count fine)))
+      (is (< (Math/abs (- (:volume c) (:volume f))) 1e-9)
+          (str "she displaces " (:volume c) " either way"))
+      (is (near-v (:centroid c) (:centroid f))
+          "and floats at the same centre of buoyancy"))))

@@ -32,7 +32,12 @@
 (def GRAVITY 25.0)
 (def WATER-DENSITY 2.6)
 (def WATER-LEVEL 0.0)
-(def FLOOD-RATE 0.5)
+;; Water in per second, per unit of intake coefficient (see intake-below):
+;; submerged opening AREA weighted by the square root of its depth. Area
+;; rather than face count, or how fast a ship founders would depend on how
+;; finely she happens to be cut up - the same shell hole exposes four times
+;; the faces at half the voxel size.
+(def FLOOD-RATE 0.035)
 
 ;; --- quaternions ([x y z w]) ---------------------------------------------------
 
@@ -54,10 +59,13 @@
 
 (defn body-point->world
   "Mesh/local point v (spawn-grid coords) under the body's live pose:
-  world = pos + R(quat) (v - anchor)."
-  [{:keys [pos quat anchor]} v]
+  world = pos + R(quat) voxel (v - anchor). :voxel is how many world units a
+  cell edge is - a finer ship is more cells of the same vessel, not a
+  bigger one."
+  [{:keys [pos quat anchor voxel]} v]
   (let [[ax ay az] anchor
-        d [(- (v 0) ax) (- (v 1) ay) (- (v 2) az)]
+        s (double (or voxel 1.0))
+        d [(* s (- (v 0) ax)) (* s (- (v 1) ay)) (* s (- (v 2) az))]
         [rx ry rz] (q-rotate quat d)]
     [(+ (pos 0) rx) (+ (pos 1) ry) (+ (pos 2) rz)]))
 
@@ -328,49 +336,57 @@
    :normal (q-rotate (:quat body) (vec dir))})
 
 (defn hull-span
-  "Half-extents [ex ey ez] of the cell set about the anchor - the hull's
-  own footprint, which is where voxel.physics samples the water under it."
-  [cells anchor]
-  (let [ks (keys cells)]
-    (if (empty? ks)
-      [0.5 0.5 0.5]
-      (mapv (fn [axis]
-              (let [a (double (anchor axis))]
-                (+ 0.5 (reduce (fn [m c]
-                                 (max m (Math/abs (- (+ (c axis) 0.5) a))))
-                               0.0 ks))))
-            [0 1 2]))))
+  "Half-extents [ex ey ez] of the cell set about the anchor, in world
+  units - the hull's own footprint, which is where voxel.physics samples the
+  water under it."
+  ([cells anchor] (hull-span cells anchor 1.0))
+  ([cells anchor voxel]
+   (let [ks (keys cells)
+         s (double voxel)]
+     (if (empty? ks)
+       [(* 0.5 s) (* 0.5 s) (* 0.5 s)]
+       (mapv (fn [axis]
+               (let [a (double (anchor axis))]
+                 (* s (+ 0.5 (reduce (fn [m c]
+                                       (max m (Math/abs (- (+ (c axis) 0.5) a))))
+                                     0.0 ks)))))
+             [0 1 2])))))
 
 (defn hull-centre
-  "The hull's centre of mass in anchor-relative coordinates - every cell
+  "The hull's centre of mass in anchor-relative world units - every cell
   weighs the same, so it is the mean cell centre.
 
   The anchor is a grid landmark, not a balance point: on the dreadnought it
   sits half a cell off the centreline and a couple of cells below the mass.
   Driving her from there puts a permanent couple on the hull - she steams in
   a circle with the helm amidships and noses down under power."
-  [cells anchor]
-  (let [ks (keys cells)
-        n (double (count ks))]
-    (if (zero? n)
-      [0.0 0.0 0.0]
-      (mapv (fn [axis]
-              (- (/ (reduce (fn [a c] (+ a (c axis) 0.5)) 0.0 ks) n)
-                 (anchor axis)))
-            [0 1 2]))))
+  ([cells anchor] (hull-centre cells anchor 1.0))
+  ([cells anchor voxel]
+   (let [ks (keys cells)
+         n (double (count ks))
+         s (double voxel)]
+     (if (zero? n)
+       [0.0 0.0 0.0]
+       (mapv (fn [axis]
+               (* s (- (/ (reduce (fn [a c] (+ a (c axis) 0.5)) 0.0 ks) n)
+                       (anchor axis))))
+             [0 1 2])))))
 
 (defn surface-cache
   "Static per-hull data for the floatation hot path: the closed surface mesh
   as anchor-relative triangles, the exposed faces, the hull's footprint and
   its centre of mass - all recomputed only when damage changes the cells
   rather than every frame."
-  [cells anchor]
-  {:tris (mapv (fn [[a b c]]
-                 [(mapv - a anchor) (mapv - b anchor) (mapv - c anchor)])
-               (mesh/surface-triangles cells))
-   :faces (surface-faces cells)
-   :span (hull-span cells anchor)
-   :com (hull-centre cells anchor)})
+  ([cells anchor] (surface-cache cells anchor 1.0))
+  ([cells anchor voxel]
+   (let [s (double voxel)
+         rel (fn [p] (mapv (fn [a b] (* s (- a b))) p anchor))]
+     {:tris (mapv (fn [[a b c]] [(rel a) (rel b) (rel c)])
+                  (mesh/surface-triangles cells))
+      :faces (surface-faces cells)
+      :span (hull-span cells anchor s)
+      :com (hull-centre cells anchor s)
+      :voxel s})))
 
 (defn openings-below
   "Count of intake openings: exposed fracture faces (not original skin) whose
@@ -381,28 +397,70 @@
   plane height at a face centre and the world normal's y component are each
   one dot product on the cached face list."
   ([body] (openings-below body WATER-LEVEL))
-  ([{:keys [skin cells faces anchor] :as body} water]
+  ([{:keys [skin cells faces anchor breaches] :as body} water]
     (if (nil? skin)
       0
-      (let [breaches (clojure.set/difference (or faces (surface-faces cells)) skin)
+      ;; the breach set only changes when damage does, so it is cached with
+      ;; the rest of the hull - taking the difference of two whole face sets
+      ;; every step is O(hull) per frame, and the point of a fine voxel grid
+      ;; is that nothing per-frame may be
+      (let [breaches (or breaches
+                         (clojure.set/difference
+                          (or faces (surface-faces cells)) skin))
             [nx ny nz d] (local-water-plane body water)
-            [ax ay az] anchor]
+            [ax ay az] anchor
+            vox (double (or (:voxel body) 1.0))]
         (count (filter (fn [[cell dir]]
-                        (let [cu [(+ (- (cell 0) ax) 0.5 (* 0.5 (dir 0)))
-                                  (+ (- (cell 1) ay) 0.5 (* 0.5 (dir 1)))
-                                  (+ (- (cell 2) az) 0.5 (* 0.5 (dir 2)))]]
+                        (let [cu [(* vox (+ (- (cell 0) ax) 0.5 (* 0.5 (dir 0))))
+                                  (* vox (+ (- (cell 1) ay) 0.5 (* 0.5 (dir 1))))
+                                  (* vox (+ (- (cell 2) az) 0.5 (* 0.5 (dir 2))))]]
                           (and (< (+ (* nx (cu 0)) (* ny (cu 1)) (* nz (cu 2))) d)
                                (<= (+ (* nx (dir 0)) (* ny (dir 1)) (* nz (dir 2))) 0.25))))
                       breaches))))))
 
+(defn intake-below
+  "How fast water can get in through the breaches, as a flow coefficient:
+  the submerged opening area weighted by the square root of its depth.
+
+  Torricelli - the head above a hole sets the speed through it. Counting
+  openings instead makes a scratch at the waterline as deadly as a hole
+  under the turn of the bilge, which is what let one shell put a ship down:
+  every hit was a hole and every hole drowned her at the same rate. Now a
+  hit at the waterline seeps, she settles, and the next one is deeper."
+  ([body] (intake-below body WATER-LEVEL))
+  ([{:keys [skin cells faces anchor breaches voxel] :as body} water]
+   (if (nil? skin)
+     0.0
+     (let [breaches (or breaches
+                        (clojure.set/difference
+                         (or faces (surface-faces cells)) skin))
+           [nx ny nz d] (local-water-plane body water)
+           [ax ay az] anchor
+           vox (double (or voxel 1.0))
+           area (* vox vox)]
+       (reduce (fn [acc [cell dir]]
+                 (let [cu [(* vox (+ (- (cell 0) ax) 0.5 (* 0.5 (dir 0))))
+                           (* vox (+ (- (cell 1) ay) 0.5 (* 0.5 (dir 1))))
+                           (* vox (+ (- (cell 2) az) 0.5 (* 0.5 (dir 2))))]
+                       depth (- d (+ (* nx (cu 0)) (* ny (cu 1)) (* nz (cu 2))))]
+                   (if (and (pos? depth)
+                            (<= (+ (* nx (dir 0)) (* ny (dir 1)) (* nz (dir 2)))
+                                0.25))
+                     (+ acc (* area (Math/sqrt depth)))
+                     acc)))
+               0.0 breaches)))))
+
 (defn step-flooding
-  "Accumulate ingressed water for dt seconds: FLOOD-RATE per submerged
-  opening, capped at one unit per cell of hull."
+  "Accumulate ingressed water for dt seconds at FLOOD-RATE times the intake
+  coefficient, capped at the hull's own volume."
   ([body dt] (step-flooding body dt WATER-LEVEL))
   ([body dt water]
-   (let [cap (count (:cells body))
-         rate (* FLOOD-RATE (openings-below body water))]
-     (assoc body :flood (min (double cap)
+   (let [vox (double (or (:voxel body) 1.0))
+         ;; she can take on her own volume of water and no more - a count of
+         ;; cells is not a volume once a cell stops being a unit cube
+         cap (* (count (:cells body)) vox vox vox)
+         rate (* FLOOD-RATE (intake-below body water))]
+     (assoc body :flood (min cap
                              (+ (or (:flood body) 0.0) (* rate dt)))))))
 
 (defn flood-force
@@ -415,13 +473,20 @@
   (let [f (or (:flood body) 0.0)]
     (if (<= f 0.0)
       nil
+      ;; The deepest corner of the hull's own bounding box, not the deepest
+      ;; cell: which cell that is changes with every wave, so finding it is
+      ;; O(hull) per frame, and eight corners say the same thing about where
+      ;; the water in her has run to.
       (let [[nx ny nz] (local-water-plane body water)
-            [ax ay az] (:anchor body)
-            depth (fn [c] (+ (* nx (- (+ (c 0) 0.5) ax))
-                             (* ny (- (+ (c 1) 0.5) ay))
-                             (* nz (- (+ (c 2) 0.5) az))))
-            lowest (reduce (fn [a b] (if (< (depth b) (depth a)) b a))
-                           (keys (:cells body)))
-            p (cell-center->world body lowest)]
+            [cx cy cz] (or (:com body) [0.0 0.0 0.0])
+            [ex ey ez] (or (:span body) [1.0 1.0 1.0])
+            corner (fn [sx sy sz]
+                     [(+ cx (* sx ex)) (+ cy (* sy ey)) (+ cz (* sz ez))])
+            depth (fn [u] (+ (* nx (u 0)) (* ny (u 1)) (* nz (u 2))))
+            low (reduce (fn [a b] (if (< (depth b) (depth a)) b a))
+                        (for [sx [-1.0 1.0] sy [-1.0 1.0] sz [-1.0 1.0]]
+                          (corner sx sy sz)))
+            [rx ry rz] (q-rotate (:quat body) low)
+            pos (:pos body)]
         {:force [0.0 (- (* WATER-DENSITY GRAVITY f)) 0.0]
-         :point p})))))
+         :point [(+ (pos 0) rx) (+ (pos 1) ry) (+ (pos 2) rz)]})))))

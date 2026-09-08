@@ -9,10 +9,14 @@
                 {:name "voxel_b3"
                  :darwin ["native/libvoxel_b3.dylib"]
                  :linux  ["native/libvoxel_b3.so"]}
-                ;; sparse vortex-field kernel, no deps
+                ;; ocean sim + render kernels
                 {:name "voxel_sea"
                  :darwin ["native/libvoxel_sea.dylib"]
-                 :linux  ["native/libvoxel_sea.so"]}]
+                 :linux  ["native/libvoxel_sea.so"]}
+                ;; voxel surface extraction + the floatation solve, no deps
+                {:name "voxel_hull"
+                 :darwin ["native/libvoxel_hull.dylib"]
+                 :linux  ["native/libvoxel_hull.so"]}]
 
  ;; The shared library above is compiled from native/voxel_b3.c by `jolt native`.
  ;; Tasks come from deps.edn as readily as from bb.edn, so the C build lives with
@@ -74,11 +78,24 @@
                         (if mac? "/opt/homebrew/lib/libraylib.dylib" "-lraylib"))
                  (println "built:" sea-lib))))}
 
+  hull
+  {:doc "compile native/voxel_hull.c into the floatation kernel library"
+   :task (let [hull-lib (str "native/libvoxel_hull." (if mac? "dylib" "so"))
+               hull-src "native/voxel_hull.c"]
+           (if (and (fs/exists? hull-lib)
+                    (empty? (fs/modified-since hull-lib [hull-src])))
+             (println "hull: up to date -" hull-lib)
+             (do (shell "cc" "-O2" "-std=c11" "-shared" "-fPIC"
+                        hull-src "-o" hull-lib)
+                 (println "built:" hull-lib))))}
+
   clean-native
   {:doc "remove the compiled shims (not the vendored Box3D build)"
    :task (do (fs/delete-if-exists lib)
              (fs/delete-if-exists "native/libvoxel_sea.dylib")
              (fs/delete-if-exists "native/libvoxel_sea.so")
+             (fs/delete-if-exists "native/libvoxel_hull.dylib")
+             (fs/delete-if-exists "native/libvoxel_hull.so")
              (println "removed:" lib))}}
 
  :aliases {:test {:extra-paths ["test"]

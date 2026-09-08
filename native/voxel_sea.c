@@ -1141,12 +1141,13 @@ typedef struct {
 	Mesh mesh;
 	Material mat;
 	int faces;             // face count the mesh was built for
+	double voxel;          // world units per cell edge
 	int ready;
 	int gl;                // GPU buffers exist (a window is up)
 	// per-face static data in build order
 	signed char (*dir)[3]; // local outward normal
 	signed char *dirq;     // dir_tris/dir_norm index, resolved at build
-	signed char (*v0)[3];  // local quad corner, anchor-relative
+	short (*v0)[3];        // local quad corner, in cells
 	unsigned char (*base)[4];
 	float *verts, *norms;
 	unsigned char *cols_;
@@ -1168,11 +1169,12 @@ static const int dir_norm[6][3] = {
 	{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1},
 };
 
-// vsea_ship_init(cells, colors, n): build a hull mesh from its exposed
-// faces. cells packs (i, j, k, dir-index) per face, colors the packed
-// base colour per face. Returns the ship id, or -1 when full.
+// vsea_ship_init(cells, colors, n, voxel): build a hull mesh from its
+// exposed faces. cells packs (i, j, k, dir-index) per face, colors the
+// packed base colour per face, voxel is how many world units a cell edge
+// is. Returns the ship id, or -1 when full.
 int64_t vsea_ship_init(const int64_t *cells, const unsigned char *colors,
-                       int64_t n)
+                       int64_t n, double voxel)
 {
 	int id = -1;
 	for (int s = 0; s < SEA_MAX_SHIPS; s++)
@@ -1197,9 +1199,10 @@ int64_t vsea_ship_init(const int64_t *cells, const unsigned char *colors,
 	sh->idx = malloc(vc * sizeof(uint16_t));
 	sh->dir = malloc(n * 3);
 	sh->dirq = malloc(n);
-	sh->v0 = malloc(n * 3);
+	sh->v0 = malloc(n * 3 * sizeof(short));
 	sh->base = malloc(n * 4);
 	sh->faces = (int)n;
+	sh->voxel = voxel;
 	// static indices: 6 vertices per face in order
 	for (int64_t v = 0; v < vc; v++)
 		sh->idx[v] = (uint16_t)v;
@@ -1226,9 +1229,9 @@ int64_t vsea_ship_init(const int64_t *cells, const unsigned char *colors,
 		sh->dir[f][1] = (signed char)dir_norm[d][1];
 		sh->dir[f][2] = (signed char)dir_norm[d][2];
 		sh->dirq[f] = (signed char)d;    // no per-frame reverse lookup
-		sh->v0[f][0] = (signed char)i;   // anchor subtracted by caller
-		sh->v0[f][1] = (signed char)j;
-		sh->v0[f][2] = (signed char)k;
+		sh->v0[f][0] = (short)i;
+		sh->v0[f][1] = (short)j;
+		sh->v0[f][2] = (short)k;
 		for (int q = 0; q < 4; q++)
 			sh->base[f][q] = colors[f * 4 + q];
 		(void)dir_tris;  // offsets applied in draw below
@@ -1289,11 +1292,14 @@ void vsea_ship_draw(int64_t id, const double *pos, const double *quat,
 		double shade = 0.35 + 0.65 * dot;
 		if (shade > 1.0)
 			shade = 1.0;
-		int64_t ci = sh->v0[f][0], cj = sh->v0[f][1], ck = sh->v0[f][2];
+		int ci = sh->v0[f][0], cj = sh->v0[f][1], ck = sh->v0[f][2];
+		double vox = sh->voxel;
 		for (int q = 0; q < 6; q++) {
-			double lx = ci + dir_tris[d][q][0] - ax;
-			double ly = cj + dir_tris[d][q][1] - ay;
-			double lz = ck + dir_tris[d][q][2] - az;
+			// cell indices are grid coordinates; the voxel size turns them
+			// into the ship's actual size, whatever the grid resolution
+			double lx = (ci + dir_tris[d][q][0] - ax) * vox;
+			double ly = (cj + dir_tris[d][q][1] - ay) * vox;
+			double lz = (ck + dir_tris[d][q][2] - az) * vox;
 			// rotate the local corner, then translate
 			double vtx = 2.0 * (qy * lz - qz * ly);
 			double vty = 2.0 * (qz * lx - qx * lz);

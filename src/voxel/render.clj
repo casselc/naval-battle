@@ -57,20 +57,22 @@
 (defonce ship-meshes (volatile! {}))
 
 (defn ship-extent
-  "Hull footprint semi-axes [ex ez] about the anchor, from its face cells.
-  Cell indices are grid coordinates, so the anchor has to come out of them
-  first - measuring |i| and |k| raw returns the distance from the grid
-  origin, which for the dreadnought is twice the true half-length."
-  [faces anchor]
-  (let [ax (double (anchor 0))
-        az (double (anchor 2))
-        reach (fn [sel a]
-                (reduce (fn [m face]
-                          (let [c (double (sel (first face)))]
-                            (max m (Math/abs (- (+ c 0.5) a)))))
-                        0.0 faces))]
-    [(+ 0.5 (reach #(% 0) ax))
-     (+ 0.5 (reach #(% 2) az))]))
+  "Hull footprint semi-axes [ex ez] about the anchor, in WORLD units, from
+  its face cells. Cell indices are grid coordinates: the anchor has to come
+  out of them and the voxel size has to go in, or the shadow is drawn at
+  whatever the grid resolution happens to be."
+  ([faces anchor] (ship-extent faces anchor 1.0))
+  ([faces anchor voxel]
+   (let [ax (double (anchor 0))
+         az (double (anchor 2))
+         s (double voxel)
+         reach (fn [sel a]
+                 (reduce (fn [m face]
+                           (let [c (double (sel (first face)))]
+                             (max m (Math/abs (- (+ c 0.5) a)))))
+                         0.0 faces))]
+     [(* s (+ 0.5 (reach #(% 0) ax)))
+      (* s (+ 0.5 (reach #(% 2) az)))])))
 
 (defn- ensure-ship-mesh!
   "The C mesh for one hull, rebuilt only when its signature (exposed-face
@@ -87,9 +89,10 @@
                 colors (mapv (fn [[cell _dir]]
                                (cell-color cell (get cells cell) sunk))
                              fseq)
-                mid (seac/ship-init! fseq colors)]
+                mid (seac/ship-init! fseq colors (:voxel ship 1.0))]
             (vswap! ship-meshes assoc id
-                    {:id mid :sig sig :ext (ship-extent fseq (:anchor ship))})
+                    {:id mid :sig sig
+                     :ext (ship-extent fseq (:anchor ship) (:voxel ship 1.0))})
             mid)))))
 
 (defn- draw-ship!

@@ -4,6 +4,7 @@
   floating body is driven independently (multi-shell crews of bodies)."
   (:require [clojure.test :refer [deftest is testing]]
             [voxel.physics :as phys]
+            [voxel.mesh :as mesh]
             [voxel.ship :as ship]
             [voxel.world :as w]
             [voxel.box3d :as b3]
@@ -95,7 +96,8 @@
   (phys/init!)
   (let [layout (ship/dreadnought)
         id (phys/spawn-body! [0.0 -3.0 0.0] (buoy/yaw-quat 0.0) 1
-                             (:anchor layout) (keys (:cells layout)))
+                             (:anchor layout) (keys (:cells layout))
+                             nil (:voxel layout))
         y1 (body-y (settle 10.0 0.05) id)
         y2 (body-y (settle 10.0 0.05) id)]
     (is (< y1 -2.6) "three of four hull levels are under - a warship's draft")
@@ -129,7 +131,8 @@
   (phys/init!)
   (let [layout (ship/dreadnought)
         id (phys/spawn-body! [0.0 -3.0 0.0] (buoy/yaw-quat 0.0) 1
-                             (:anchor layout) (keys (:cells layout)))
+                             (:anchor layout) (keys (:cells layout))
+                             nil (:voxel layout))
         z0 (get-in (body-fact (settle 8.0 0.05) id) [:pos 2])
         f (body-fact (sail id 5.0 0.05 1.0 0.0) id)]
     (is (> (- (get-in f [:pos 2]) z0) 4.0)
@@ -142,7 +145,8 @@
   (phys/init!)
   (let [layout (ship/dreadnought)
         id (phys/spawn-body! [0.0 -3.0 0.0] (buoy/yaw-quat 0.0) 1
-                             (:anchor layout) (keys (:cells layout)))]
+                             (:anchor layout) (keys (:cells layout))
+                             nil (:voxel layout))]
     (settle 8.0 0.05)
     (is (> (yaw-of (body-fact (sail id 3.0 0.05 0.0 1.0) id)) 0.15)
         "right helm swings the bow toward +x (starboard)")))
@@ -252,7 +256,7 @@
 (defn- warship []
   (let [l (ship/dreadnought)]
     (phys/spawn-body! [0.0 -3.0 0.0] (buoy/yaw-quat 0.0) 1
-                      (:anchor l) (keys (:cells l)))))
+                      (:anchor l) (keys (:cells l)) nil (:voxel l))))
 
 (defn- track-off
   "How far the hull ends up from where a gunner would have predicted, having
@@ -332,3 +336,69 @@
           (is (< (Math/abs sx) (* 0.4 sz))
               (str "a second after a 6 u/s kick she has " sx " left across "
                    "the beam against " sz " along the keel")))))))
+
+(deftest damage-refreshes-the-live-skin
+  (testing "the exposed faces come back from the kernel after a hit, so the
+            renderer's hull follows the damage"
+    (phys/init!)
+    (let [id (warship)
+          before (:faces (body-fact (phys/step! 0.02) id))
+          layout (ship/dreadnought)
+          ;; scoop out a block amidships
+          doomed (filter (fn [[i j k]]
+                           (and (< (Math/abs (- k (quot ship/LENGTH 2))) 4)
+                                (> j (- ship/DEPTH 4))))
+                         (keys (:cells layout)))]
+      (is (seq before))
+      (phys/damage-cells! id (set doomed))
+      (let [after (:faces (body-fact (phys/step! 0.02) id))]
+        (is (seq after))
+        (is (not= before after) "the skin changed where the hull did")))))
+
+;; --- she rides, she does not bob --------------------------------------------
+
+(deftest a-hull-settles-instead-of-bobbing
+  (testing "pushed under and released, she comes back and stays there"
+    ;; without drag against vertical motion a floating body is a cork: it
+    ;; oscillates about its waterline for as long as you care to watch
+    (phys/init!)
+    (let [id (warship)
+          _ (settle 12.0 0.02)
+          y0 (get-in (body-fact (phys/step! 0.02) id) [:pos 1])
+          _ (b3/set-velocity! id 0.0 -4.0 0.0)
+          trace (mapv (fn [_]
+                        (let [f (body-fact (settle 0.4 0.02) id)]
+                          (- (get-in f [:pos 1]) y0)))
+                      (range 12))
+          late (drop 6 trace)]
+      (is (< (apply min trace) -0.3) "she goes under from the push")
+      (is (every? #(< (Math/abs %) 0.25) late)
+          (str "and is back on her waterline within two seconds: " (vec late)))
+      (is (< (apply max (map #(Math/abs %) late))
+             (* 0.4 (apply max (map #(Math/abs %) (take 4 trace)))))
+          "each swing is much smaller than the last, not a ringing cork"))))
+
+(deftest a-warship-is-heavy-and-draws-deep
+  (testing "she floats with most of her hull under and a little freeboard"
+    (phys/init!)
+    (let [id (warship)
+          y (get-in (body-fact (settle 12.0 0.02) id) [:pos 1])
+          draft (- y)]
+      (is (< (* 0.55 ship/DEPTH-U) draft (* 0.9 ship/DEPTH-U))
+          (str "draws " draft " of a " ship/DEPTH-U "-unit hull"))
+      (is (> (+ ship/DEPTH-U y) 0.5) "and keeps a deck edge above water"))))
+
+(deftest a-fine-hull-is-a-handful-of-collision-solids
+  (testing "the physics body follows the hull's shape, not its cell count"
+    ;; one solid per voxel is what a coarse ship could get away with; the
+    ;; same hull at half-size voxels is eight times the cells and no solver
+    ;; wants tens of thousands of shapes for two ships
+    (let [cells (:cells (ship/dreadnought))
+          boxes (mesh/solid-boxes cells)
+          filled (reduce + (map (fn [[i0 j0 k0 i1 j1 k1]]
+                                  (* (- i1 i0) (- j1 j0) (- k1 k0)))
+                                boxes))]
+      (is (= (count cells) filled)
+          "the boxes tile the voxels exactly - same shape, same mass")
+      (is (< (count boxes) (/ (count cells) 100))
+          (str (count boxes) " solids for " (count cells) " voxels")))))

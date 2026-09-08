@@ -101,9 +101,15 @@
     (is (= (count (buoy/surface-faces (get-in st [:ships :enemy :cells])))
            (count (get-in st [:ships :enemy :faces])))
         "intact hulls cache their exposed faces")
-    (is (= (count (buoy/surface-faces (get-in final [:ships :enemy :cells])))
-           (count (get-in final [:ships :enemy :faces])))
-        "a blast re-derives the live face cache from the carved cells")))
+    ;; after damage the live faces come back from voxel.physics, which has
+    ;; them from the native kernel - the world never re-walks the cell set,
+    ;; because at this grid resolution that is a pass over nine thousand
+    ;; cells per hit. See physics-test/damage-refreshes-the-live-skin.
+    (is (< (count (get-in final [:ships :enemy :cells]))
+           (count (get-in st [:ships :enemy :cells])))
+        "the blast carved her")
+    (is (seq (get-in final [:ships :enemy :faces]))
+        "and she still carries a face set for the renderer")))
 
 (deftest the-enemy-returns-fire
   (testing "in range it opens up on the player"
@@ -176,9 +182,9 @@
   (testing "she breaks off before the hulls can touch - these are 26-unit
             ships, so a centre-to-centre range near that is already a
             collision, and ramming puts a hull under undamaged"
-    (is (> w/KNIFE-RANGE ship/LENGTH)
+    (is (> w/KNIFE-RANGE ship/LENGTH-U)
         (str "break-off range " w/KNIFE-RANGE " against a "
-             ship/LENGTH "-unit hull"))
+             ship/LENGTH-U "-unit hull"))
     (is (> w/STANDOFF w/KNIFE-RANGE)
         "and she settles further out than that, not on the edge of it")))
 

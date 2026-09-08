@@ -20,7 +20,7 @@
   "Build a hull mesh from faces, run f with its id, always free it."
   [faces f]
   (let [colors (vec (repeat (count faces) (unchecked-int 0xFF806040)))
-        id (seac/ship-init! faces colors)]
+        id (seac/ship-init! faces colors 1.0)]
     (is (>= id 0) "hull mesh allocated")
     (try (f id)
          (finally (seac/ship-free! id)))))
@@ -170,12 +170,17 @@
   (testing "the dreadnought's shadow is its real footprint, not its grid offset"
     (let [layout (ship/dreadnought)
           faces (vec (buoy/surface-faces (:cells layout)))
-          [ex ez] (render/ship-extent faces (:anchor layout))]
-      ;; hull is 7 wide (i 0..6) and 26 long (k 0..25) about anchor [3 0 13]
-      (is (< (Math/abs (- ex 4.0)) 0.51) (str "half-beam ~3.5, got " ex))
-      (is (< (Math/abs (- ez 13.5)) 0.51) (str "half-length ~13, got " ez))))
+          [ex ez] (render/ship-extent faces (:anchor layout) (:voxel layout))]
+      ;; the answer is in world units whatever the grid resolution is
+      (is (< (Math/abs (- ex (* 0.5 ship/BEAM-U))) 0.6)
+          (str "half-beam ~" (* 0.5 ship/BEAM-U) ", got " ex))
+      (is (< (Math/abs (- ez (* 0.5 ship/LENGTH-U))) 0.6)
+          (str "half-length ~" (* 0.5 ship/LENGTH-U) ", got " ez))))
   (testing "a cell at the anchor has a half-cell footprint"
-    (is (= [1.0 1.0] (render/ship-extent [[[3 0 13] [0 1 0]]] [3.0 0.0 13.0])))))
+    (is (= [1.0 1.0] (render/ship-extent [[[3 0 13] [0 1 0]]] [3.0 0.0 13.0]))))
+  (testing "and it scales with the voxel size, not the cell count"
+    (is (= [0.5 0.5]
+           (render/ship-extent [[[3 0 13] [0 1 0]]] [3.0 0.0 13.0] 0.5)))))
 
 
 ;; --- what the water looks like ----------------------------------------------

@@ -33,8 +33,8 @@
   (let [{:keys [cells]} (ship/dreadnought)
         ks (map #(nth % 2) (keys cells))
         length (- (apply max ks) (apply min ks) -1)
-        midships (beam-at cells 13)
-        bow (beam-at cells 25)]
+        midships (beam-at cells (quot ship/LENGTH 2))
+        bow (beam-at cells (dec ship/LENGTH))]
     (is (> length (* 2.5 midships)) "a ship, not a barge")
     (is (< bow midships) "the prow narrows")
     (is (pos? bow) "but the bow still has substance")))

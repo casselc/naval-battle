@@ -24,13 +24,28 @@ prototype rendered with raylib and simulated with Box3D.
   surface mesh, clipped at the plane fitted to the particles under that hull.
   Ships heave on the swell and the wave slope under them rolls and pitches
   them; listing, flooding and sinking emerge from the geometry rather than
-  from scripts.
+  from scripts. Water resists a hull moving up through it as well as
+  sideways, so a ship rides a swell and settles from a blast rather than
+  bobbing like a cork.
+
+  The solve is linear in surface triangles and runs in C, which is what lets
+  a ship be made of as many voxels as it looks like it should be: ~9000 per
+  dreadnought at half-unit cells, solved in 45 microseconds a step. Voxel
+  size is a property of the layout, so raising the resolution gives a finer
+  ship of the same size rather than a bigger one. The collision body is a
+  greedy box decomposition of the same voxels - nine solids, exactly tiling
+  them, so it has their mass and shape without one shape per cell.
 - **Combat** — ballistic shells with an analytic firing solution preview arc,
   voxel-level hull carving on impact, flooding of carved cells, and debris.
   Shells have their own gravity, separate from the world's, so gun range and
   time of flight are independent: a round takes about two and a half seconds
   to cross the fighting range, which is long enough for a ship to be
   somewhere else when it lands.
+
+  Water gets in through breaches at a rate set by their area and the head
+  above them, so a hit at the waterline seeps and one under the bilge floods.
+  A duel is a couple of dozen salvoes, chipping voxels off a hull that
+  settles as it takes water, rather than one lucky shell.
 - **Manoeuvring** — hulls resist moving sideways far harder than ahead, and
   propulsion acts through the centre of mass, so putting the helm over
   changes where a ship ends up rather than just which way she points. That is
@@ -51,12 +66,13 @@ prototype rendered with raylib and simulated with Box3D.
 ```
 jolt native     # compile native/voxel_b3.c (the Box3D shim)
 jolt sea        # compile native/voxel_sea.c (ocean sim + render kernels)
+jolt hull       # compile native/voxel_hull.c (the floatation kernel)
 jolt -M:run     # play
 jolt -M:test    # run the test suite
 ```
 
-Both native tasks are mtime-checked, so they are cheap to put in front of a
-run.
+All three native tasks are mtime-checked, so they are cheap to put in front
+of a run.
 
 ## Controls
 
@@ -85,8 +101,10 @@ if the range falls to where the hulls could touch.
   footprint the ocean sizes itself from. Pure, so both the renderer and the
   world can read it
 - `src/voxel/ship.clj` — the dreadnought voxel layout
-- `src/voxel/mesh.clj` — voxel surface extraction, and the divergence-theorem
-  volume/centroid sums written out plainly
+- `src/voxel/mesh.clj` — voxel surface extraction, the divergence-theorem
+  volume/centroid sums written out plainly, and the collision box
+  decomposition
+- `src/voxel/hullc.clj` — FFI bindings to the floatation kernel
 - `src/voxel/physics.clj` — Box3D bodies, floatation forces, damage
 - `src/voxel/seac.clj` — FFI bindings to the sea kernels
 - `src/voxel/box3d.clj` — FFI bindings to the Box3D shim
@@ -98,11 +116,16 @@ if the range falls to where the hulls could touch.
   sea and hull meshes. Particle data lives here and never crosses the FFI
   boundary per particle: jolt asks for a step, and the renderer's mesh is
   filled from the same arrays
+- `native/voxel_hull.c` — voxel surface extraction and the floatation solve.
+  A hull's mesh lives here for the same reason the ocean's particles do: the
+  algorithm is cheap and the marshalling is not
 
 Pure logic (world/ocean/buoyancy/mesh/ship/camera) is headless and
-unit-tested. The C kernels are unit-tested too — they skip every GL call when
-no window is up, so their vertex buffers can be read back and checked without
-a window or a screenshot diff.
+unit-tested, and stays the reference for what the native kernels do: the
+tests hold the C ocean step, FMM and floatation solve to the Clojure versions
+of the same thing. The render kernels are unit-tested too — they skip every
+GL call when no window is up, so their vertex buffers can be read back and
+checked without a window or a screenshot diff.
 
 ## Smoke testing headlessly
 

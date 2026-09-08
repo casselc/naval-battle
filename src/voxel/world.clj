@@ -39,8 +39,12 @@
 (def GUN-RANGE (/ (* SHELL-SPEED SHELL-SPEED) SHELL-GRAVITY))
 
 (def FIRE-COOLDOWN 3.0)
-(def BLAST-RADIUS 2.6)
-(def SUNK-DEPTH 6.0)
+(def BLAST-RADIUS 2.2)
+;; She is gone when her keel is this far under - which has to be measured
+;; from the hull, not picked. A fixed six was set when she drew three; at a
+;; deeper hull she floats at four and a half, so a six-unit test declared her
+;; sunk after settling a foot and a half and no ship ever had to founder.
+(def SUNK-DEPTH (+ ship/DEPTH-U 2.0))
 (def SHELL-LIFETIME 20.0)
 ;; A shell this far from its own gun has left the battle. Measured from
 ;; where it was fired, not from the world origin: the fight drifts wherever
@@ -58,14 +62,20 @@
   "A fleet record from a voxel.ship layout, posed at pos with the given
   yaw (bow at +k in layout space)."
   [id layout pos yaw]
-  (let [cells (:cells layout)]
+  (let [cells (:cells layout)
+        ;; an intact hull's skin IS its surface, so one pass does for both.
+        ;; This is the only place the world walks the whole cell set: after
+        ;; damage the live faces come back from voxel.physics, which has
+        ;; them from the native kernel already.
+        skin (buoy/surface-faces cells)]
     {:id id
      :ai false
      :cells cells
      :anchor (:anchor layout)
      :guns (:guns layout)
-     :skin (buoy/skin-faces cells)
-     :faces (buoy/surface-faces cells)
+     :voxel (:voxel layout 1.0)
+     :skin skin
+     :faces skin
      :pos pos
      :quat (buoy/yaw-quat yaw)
      :body nil
@@ -97,6 +107,10 @@
    :time 0.0
    :events []})
 
+;; how far above its cell a gun's muzzle sits, in world units, so shells
+;; clear the turret whatever the voxel grid is
+(def ^:private MUZZLE-CLEARANCE 1.0)
+
 ;; --- gunnery ------------------------------------------------------------------
 
 (defn- dist-sq
@@ -110,10 +124,11 @@
     (Math/sqrt (+ (* dx dx) (* dz dz)))))
 
 (defn- muzzle-point
-  "World point of a gun cell's muzzle: the cell centre, a cell and a half up
-  so shells clear the turret."
+  "World point of a gun cell's muzzle: the cell centre, clear of the turret."
   [ship [i j k]]
-  (buoy/body-point->world ship [(+ i 0.5) (+ j 1.5) (+ k 0.5)]))
+  (let [vox (double (or (:voxel ship) 1.0))]
+    (buoy/body-point->world
+     ship [(+ i 0.5) (+ j 0.5 (/ MUZZLE-CLEARANCE vox)) (+ k 0.5)])))
 
 (defn- nearest-gun
   [ship target]
@@ -180,13 +195,14 @@
 ;; --- shell flight ----------------------------------------------------------------
 
 (defn- world->local
-  "World point into the ship's grid coordinates — the inverse of
+  "World point into the ship's voxel grid coordinates — the inverse of
   voxel.buoyancy/body-point->world."
-  [{:keys [pos quat anchor]} p]
+  [{:keys [pos quat anchor voxel]} p]
   (let [[qx qy qz qw] quat
+        s (double (or voxel 1.0))
         d (mapv - p pos)
         [rx ry rz] (buoy/q-rotate [(- qx) (- qy) (- qz) qw] d)]
-    (mapv + anchor [rx ry rz])))
+    (mapv + anchor [(/ rx s) (/ ry s) (/ rz s)])))
 
 (defn- cell-at
   "The hull cell containing world point p, if any."
@@ -195,16 +211,35 @@
     [(int (Math/floor (v 0))) (int (Math/floor (v 1))) (int (Math/floor (v 2)))]))
 
 (defn- carve-ship
-  "The ship minus every cell whose world centre lies within radius of world
-  point p, with the doomed cells."
+  "The ship minus every cell whose centre lies within radius of world point
+  p, with the doomed cells.
+
+  The blast is turned into the hull's own grid and only the cells in that
+  neighbourhood are looked at. Sweeping the whole cell map instead is a pass
+  over the entire ship for every hit, which is what a fine voxel grid cannot
+  afford - and the answer is the same either way."
   [ship p radius]
-  (let [r2 (* radius radius)
-        doomed (vec (for [[cell _] (:cells ship)
-                          :let [c (buoy/cell-center->world ship cell)]
-                          :when (<= (dist-sq c p) r2)]
+  (let [vox (double (or (:voxel ship) 1.0))
+        c (world->local ship p)
+        rv (/ radius vox)
+        r2 (* rv rv)
+        lo (fn [a] (int (Math/floor (- (c a) rv 0.5))))
+        hi (fn [a] (int (Math/ceil (+ (c a) rv 0.5))))
+        cells (:cells ship)
+        doomed (vec (for [i (range (lo 0) (inc (hi 0)))
+                          j (range (lo 1) (inc (hi 1)))
+                          k (range (lo 2) (inc (hi 2)))
+                          :let [cell [i j k]]
+                          :when (and (contains? cells cell)
+                                     (<= (+ (* (- (+ i 0.5) (c 0))
+                                               (- (+ i 0.5) (c 0)))
+                                            (* (- (+ j 0.5) (c 1))
+                                               (- (+ j 0.5) (c 1)))
+                                            (* (- (+ k 0.5) (c 2))
+                                               (- (+ k 0.5) (c 2))))
+                                         r2))]
                       cell))]
-    (let [carved (update ship :cells #(apply dissoc % doomed))]
-      [(assoc carved :faces (buoy/surface-faces (:cells carved))) doomed])))
+    [(update ship :cells #(apply dissoc % doomed)) doomed]))
 
 (defn- shell-step
   "Advance one shell one frame, substepped so a fast shell cannot tunnel a
@@ -266,7 +301,7 @@
 ;; are 26-unit ships - a range measured centre to centre that is barely more
 ;; than a ship's length is already an overlap when they are bow on. Ramming
 ;; put a hull under with its armour untouched.
-(def KNIFE-RANGE (max (* 0.55 GUN-RANGE) (* 1.25 ship/LENGTH)))
+(def KNIFE-RANGE (max (* 0.55 GUN-RANGE) (* 1.25 ship/LENGTH-U)))
 ;; a gun that comes up within a shell's flight is a gun to worry about now
 (def ^:private THREAT-HORIZON 2.4)
 ;; How hard she leans on and off the bearing to correct the range. She turns
@@ -275,7 +310,7 @@
 ;; units - the flare has to start that far outside the standoff or she blows
 ;; straight through it into a brawl. A tenth of a unit per unit of error did
 ;; exactly that.
-(def ^:private RANGE-GAIN 0.06)
+(def ^:private RANGE-GAIN 0.11)
 ;; ...and how hard she leans against the rate she is closing at. Range error
 ;; alone is proportional control through a four-second lag, which oscillates:
 ;; she overshot the standoff, ran out past it, came back in, and wandered
@@ -445,7 +480,11 @@
                             (let [moved (assoc s :pos (:pos f) :quat (:quat f)
                                                :vel (or (:vel f) [0.0 0.0 0.0])
                                                :speed (or (:speed f) 0.0)
-                                               :displaced (or (:displaced f) 0.0))]
+                                               :displaced (or (:displaced f) 0.0)
+                                               ;; the live skin, rebuilt in
+                                               ;; the native kernel whenever
+                                               ;; damage changes it
+                                               :faces (or (:faces f) (:faces s)))]
                               (if (and (not (:sunk moved))
                                        (< (second (:pos f)) (- SUNK-DEPTH)))
                                 (assoc moved :sunk true)
@@ -465,7 +504,7 @@
 ;; far out its influence reaches (the displacement profile is negligible
 ;; past three of these)
 (def ^:private STATION-RADIUS
-  (Math/sqrt (/ (* ship/BEAM ship/LENGTH WAKE-SHARE) Math/PI)))
+  (Math/sqrt (/ (* ship/BEAM-U ship/LENGTH-U WAKE-SHARE) Math/PI)))
 (def ^:private STATION-REACH (* 3.0 STATION-RADIUS))
 
 ;; gains, all rates: the water is forced for dt seconds, never kicked once
@@ -488,14 +527,14 @@
   (for [[_ s] (:ships st)
         :when (not (:sunk s))
         :let [v (or (:speed s) 0.0)
-              draft (/ (or (:displaced s) 0.0) (* ship/BEAM ship/LENGTH))
+              draft (/ (or (:displaced s) 0.0) (* ship/BEAM-U ship/LENGTH-U))
               [bx _ bz] (bow-dir s)
               [vx _ vz] (or (:vel s) [0.0 0.0 0.0])
               sp (Math/sqrt (+ (* vx vx) (* vz vz)))
               ;; heading is the course made good while she has way on,
               ;; otherwise where her bow points
               [hx hz] (if (> sp 1e-3) [(/ vx sp) (/ vz sp)] [bx bz])
-              half (* 0.5 ship/LENGTH)]
+              half (* 0.5 ship/LENGTH-U)]
         f WAKE-STATIONS]
     {:x (+ ((:pos s) 0) (* bx f half))
      :z (+ ((:pos s) 2) (* bz f half))

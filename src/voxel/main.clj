@@ -217,7 +217,9 @@
                                        (when (nil? (:body s))
                                          [id (phys/spawn-body! (:pos s) (:quat s) 1
                                                                (:anchor s)
-                                                               (keys (:cells s)))]))))
+                                                               (keys (:cells s))
+                                                               nil
+                                                               (:voxel s 1.0))]))))
                              (:ships world))
                world (if (seq pending)
                        (w/attach-bodies world pending)

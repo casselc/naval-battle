@@ -13,6 +13,8 @@
   touching the collision shape, so flooding and buoyancy react to damage the
   instant it happens while the shape refresh stays with the world layer."
   (:require [voxel.box3d :as b3]
+            [voxel.hullc :as hullc]
+            [voxel.mesh :as mesh]
             [voxel.ocean :as ocean]
             [voxel.seac :as seac]
             [voxel.buoyancy :as buoy]
@@ -51,13 +53,41 @@
 ;; would give a raft a dreadnought's grip on the water, and stations at a
 ;; fixed arm would put a small body's drag outside its own length, which
 ;; pins it rigid - a test raft stopped heeling on a sloped sea entirely.
-(def LATERAL-DRAG 1.28)          ; force per unit of sideways speed, per cell
-(def ^:private DRAG-ARM 0.7)     ; station, as a fraction of the half-length
+(def LATERAL-DRAG 1.28)          ; per unit of sideways speed, per unit hull
+
+;; A hull dragged up or down through water is resisted by it, and without
+;; that a ship is a cork: pushed under, she came back up and swung for six
+;; seconds with barely any decay. This is around six tenths of critical for
+;; the heave mode, so she rides a swell and settles from a blast instead of
+;; ringing. Taken at four stations round the centre of mass against the
+;; LOCAL vertical speed, so the same drag damps pitch and roll with it.
+(def HEAVE-DRAG 5.0)             ; per unit of vertical speed, per unit hull
+(def ^:private DRAG-ARM 0.7)     ; station, as a fraction of the half-extent
 (def ^:private EXPLOSION-FALLOFF 1.0)
 
 (def ^:private world* (volatile! nil))
 (def ^:private ball* (volatile! nil))
 (def ^:private bodies* (volatile! {}))
+;; hull ids into the native floatation kernel, which owns each body's
+;; surface mesh so no triangle crosses the boundary per step
+(def ^:private hulls* (volatile! {}))
+
+(defn- claim-hull!
+  []
+  (let [used (set (vals @hulls*))]
+    (first (remove used (range hullc/MAX-HULLS)))))
+
+(defn- hull-record
+  "Rebuild everything derived from a body's cells: the native surface mesh,
+  the exposed faces, the footprint, the balance point, and the breach set
+  the flooding reads. Runs on spawn and on damage, never per step."
+  [hull cells anchor voxel skin]
+  (let [{:keys [faces span com]} (hullc/set-hull! hull (keys cells) anchor voxel)
+        fset (set faces)]
+    {:faces fset
+     :span span
+     :com com
+     :breaches (if skin (clojure.set/difference fset skin) #{})}))
 
 (defn init!
   "Create the open-ocean Box3D world with the game's gravity: no ground, no
@@ -98,6 +128,8 @@
   (let [wrld (b3/create-world 0.0 (- w/GRAVITY) 0.0 1)]
     (vreset! world* wrld)
     (vreset! ball* nil)
+    (doseq [h (vals @hulls*)] (hullc/free-hull! h))
+    (vreset! hulls* {})
     (vreset! bodies* {})
     wrld))
 
@@ -116,30 +148,44 @@
   recorded so buoyancy and flooding always read the live mesh. awake 0 spawns
   it sleeping. vel (optional [vx vy vz]) carries impact velocity over."
   ([pos quat awake anchor cells]
-   (spawn-body! pos quat awake anchor cells nil))
+   (spawn-body! pos quat awake anchor cells nil 1.0))
   ([pos quat awake anchor cells vel]
+   (spawn-body! pos quat awake anchor cells vel 1.0))
+  ([pos quat awake anchor cells vel voxel]
    (let [[ax ay az] anchor
          [px py pz] pos
          [qx qy qz qw] quat
+         s (double voxel)
+         live (zipmap cells (repeat :cell))
          id (b3/create-body @world* b3/DYNAMIC-BODY px py pz qx qy qz qw awake)]
-     (doseq [[i j k] cells]
-       ;; hulls are 0.98 wide (render size): a hair of daylight between
-       ;; touching bodies stops coplanar face-grind without a visible gap
-       (b3/add-box! id (- (+ i 0.5) ax) (- (+ j 0.5) ay) (- (+ k 0.5) az)
-                    0.49 0.49 0.49 CELL-DENSITY CELL-FRICTION CELL-RESTITUTION))
+     ;; One collision solid per voxel does not survive a fine grid - a hull
+     ;; is thousands of cells and a handful of merged boxes. They tile the
+     ;; cells exactly, so the body still has the voxels' mass and shape;
+     ;; each is shaved a hair so touching hulls cannot grind coplanar faces.
+     (doseq [[i0 j0 k0 i1 j1 k1] (mesh/solid-boxes live)]
+       (b3/add-box! id
+                    (* s (- (* 0.5 (+ i0 i1)) ax))
+                    (* s (- (* 0.5 (+ j0 j1)) ay))
+                    (* s (- (* 0.5 (+ k0 k1)) az))
+                    (- (* 0.5 s (- i1 i0)) 0.01)
+                    (- (* 0.5 s (- j1 j0)) 0.01)
+                    (- (* 0.5 s (- k1 k0)) 0.01)
+                    CELL-DENSITY CELL-FRICTION CELL-RESTITUTION))
      (b3/set-damping! id HULL-LINEAR-DAMPING HULL-ANGULAR-DAMPING)
      (when vel
        (b3/set-velocity! id (vel 0) (vel 1) (vel 2)))
-     (let [live (zipmap cells (repeat :cell))
-           {:keys [tris faces span com]} (buoy/surface-cache live anchor)]
-       (vswap! bodies* assoc id {:cells live
-                                 :anchor anchor
-                                 :skin (buoy/skin-faces live)
-                                 :tris tris
-                                 :faces faces
-                                 :span span
-                                 :com com
-                                 :flood 0.0}))
+     (let [hull (claim-hull!)
+           skin (set (:faces (hullc/set-hull! hull (keys live) anchor s)))]
+       (vswap! hulls* assoc id hull)
+       (vswap! bodies* assoc id
+               (merge {:cells live
+                       :anchor anchor
+                       :voxel s
+                       :volume (* (count live) s s s)
+                       :hull hull
+                       :skin skin
+                       :flood 0.0}
+                      (hull-record hull live anchor s skin))))
      id)))
 
 (defn damage-cells!
@@ -149,22 +195,20 @@
   The collision shape is untouched - the world layer owns body lifecycles."
   [id cells]
   (when-let [rec (get @bodies* id)]
-    (vswap! bodies* update-in [id]
-            (fn [live]
-              (let [live' (reduce dissoc (:cells live) cells)
-                    {:keys [tris faces span com]}
-                    (buoy/surface-cache live' (:anchor live))]
-                (-> live
-                    (assoc :cells live')
-                    (assoc :tris tris)
-                    (assoc :faces faces)
-                    (assoc :span span)
-                    ;; damage moves the balance point, and driving her from
-                    ;; the old one is what makes a shot-up hull wander
-                    (assoc :com com)))))))
+    (let [live' (reduce dissoc (:cells rec) cells)]
+      (vswap! bodies* update id
+              (fn [b]
+                (merge b
+                       {:cells live'
+                        :volume (* (count live') (:voxel b) (:voxel b)
+                                   (:voxel b))}
+                       ;; damage moves the balance point too, and driving her
+                       ;; from the old one is what makes a wreck wander
+                       (hull-record (:hull b) live' (:anchor b) (:voxel b)
+                                    (:skin b))))))))
 
-(def ENGINE-FORCE 6000.0)   ; ~8 u/s flat out against the linear damping
-(def RUDDER-FORCE 3400.0)   ; bow/stern couple, ~25 deg/s of yaw
+(def ENGINE-FORCE 10100.0)  ; ~8 u/s flat out against the linear damping
+(def RUDDER-FORCE 5750.0)   ; bow/stern couple, ~25 deg/s of yaw
 (def ^:private RUDDER-ARM 11.0)      ; half the keel, about the anchor
 
 (defn steer!
@@ -213,6 +257,8 @@
   (doseq [id (keys @bodies*)]
     (when-not (contains? live-ids id)
       (b3/destroy-body! id)
+      (when-let [h (get @hulls* id)] (hullc/free-hull! h))
+      (vswap! hulls* dissoc id)
       (vswap! bodies* dissoc id)))
   (when (and @ball* (not (contains? live-ids @ball*)))
     (b3/destroy-body! @ball*)
@@ -225,11 +271,13 @@
     {:pos pos
      :quat quat
      :anchor (:anchor rec)
+     :voxel (:voxel rec)
      :cells (:cells rec)
      :skin (:skin rec)
-     :tris (:tris rec)
      :faces (:faces rec)
+     :breaches (:breaches rec)
      :span (:span rec)
+     :com (:com rec)
      :flood (:flood rec)}))
 
 (def ^:private WATER-SAMPLES
@@ -257,34 +305,50 @@
              WATER-SAMPLES)))))
 
 (defn- drive-hydrodynamics!
-  "The water's grip on one hull for this step: drag across the beam at a bow
-  and a stern station. Nothing along the keel - the body's linear damping is
-  already that."
+  "The water's grip on one hull for this step: drag across the beam, and drag
+  against moving up or down through the water. Nothing along the keel - the
+  body's linear damping is already that.
+
+  Both are taken at stations round the centre of mass against the LOCAL water
+  speed there, which includes the rotational part, so the same two mechanisms
+  also damp yaw, pitch and roll and weathervane her onto her course."
   [id rec]
   (let [[pos quat] (b3/transform id)
         [cx cy cz] (buoy/q-rotate quat (or (:com rec) [0.0 0.0 0.0]))
         [px py pz] (mapv + pos [cx cy cz])
-        [vx _ vz] (b3/velocity id)
-        [_ wy _] (b3/angular-velocity id)
+        [vx vy vz] (b3/velocity id)
+        [wx wy wz] (b3/angular-velocity id)
         side (buoy/q-rotate quat [1.0 0.0 0.0])
         fwd (buoy/q-rotate quat [0.0 0.0 1.0])
-        drag (* LATERAL-DRAG (count (:cells rec)))
-        station (* DRAG-ARM (nth (or (:span rec) [1.0 1.0 1.0]) 2))]
-    (doseq [arm [station (- station)]]
-      (let [rx (* arm (fwd 0))
-            rz (* arm (fwd 2))
-            ;; water speed at the station: hull velocity plus the rotation
-            ;; about the vertical, u = v + w x r. With w = (0, wy, 0) that
-            ;; cross product is (wy rz, 0, -wy rx) - get the sign backwards
-            ;; and the drag drives the spin instead of damping it.
-            ux (+ vx (* wy rz))
+        ;; scaled by how much ship there is, not how many cells she is cut
+        ;; into - a finer grid is the same vessel
+        hull (:volume rec 1.0)
+        [ex _ ez] (or (:span rec) [1.0 1.0 1.0])
+        lat (* LATERAL-DRAG hull)
+        ;; the vertical term is shared between its four stations, so the
+        ;; total resistance is a property of the hull, not of how many
+        ;; places it happens to be sampled at
+        heave (* 0.25 HEAVE-DRAG hull)
+        stations (concat (for [a [(* DRAG-ARM ez) (- (* DRAG-ARM ez))]]
+                           [(* a (fwd 0)) (* a (fwd 2)) true])
+                         (for [a [(* DRAG-ARM ex) (- (* DRAG-ARM ex))]]
+                           [(* a (side 0)) (* a (side 2)) false]))]
+    (doseq [[rx rz keel?] stations]
+      ;; u = v + w x r; level with the centre of mass that comes out as
+      ;; (wy rz, wz rx - wx rz, -wy rx). Get a sign backwards and the drag
+      ;; drives the motion instead of damping it.
+      (let [ux (+ vx (* wy rz))
             uz (- vz (* wy rx))
-            slip (+ (* ux (side 0)) (* uz (side 2)))
-            f (- (* drag slip))]
-        (b3/apply-force! id
-                         (* f (side 0)) 0.0 (* f (side 2))
-                         (+ px rx) py (+ pz rz)
-                         false)))))
+            uy (+ vy (- (* wz rx) (* wx rz)))]
+        ;; sideslip needs only the two keel stations; taking it across the
+        ;; beam as well would just double it
+        (when keel?
+          (let [slip (+ (* ux (side 0)) (* uz (side 2)))
+                f (- (* lat slip))]
+            (b3/apply-force! id (* f (side 0)) 0.0 (* f (side 2))
+                             (+ px rx) py (+ pz rz) false)))
+        (b3/apply-force! id 0.0 (- (* heave uy)) 0.0
+                         (+ px rx) py (+ pz rz) false)))))
 
 (defn- drive-floatation!
   "One body's water interaction for this step: buoyant uplift and flood weight
@@ -296,8 +360,14 @@
   and pitches her, and a sea running over a breach floods her faster."
   [id rec dt water]
   (let [body (pose-record id rec)
-        plane (water-plane body water)
-        lift (buoy/buoyancy-force body plane)]
+        plane (buoy/as-plane (water-plane body water))
+        ;; the divergence-theorem solve runs in C over the hull's own mesh
+        {:keys [volume centroid]} (hullc/metrics (:hull rec) (:pos body)
+                                                 (:quat body) plane)
+        lift (when (and (pos? volume) centroid)
+               {:force [0.0 (* buoy/WATER-DENSITY buoy/GRAVITY volume) 0.0]
+                :point centroid
+                :volume volume})]
     (doseq [{:keys [force point]} (keep identity
                                         [lift (buoy/flood-force body plane)])]
       (b3/apply-force! id
@@ -320,6 +390,9 @@
      :vel [vx vy vz]
      :speed (Math/sqrt (+ (* vx vx) (* vy vy) (* vz vz)))
      :displaced (get-in @bodies* [id :displaced] 0.0)
+     ;; the live exposed faces, so the renderer's hull mesh follows damage
+     ;; without the world layer walking the cell set to find them
+     :faces (get-in @bodies* [id :faces])
      :asleep (not (b3/awake? id))}))
 
 (defn step!
