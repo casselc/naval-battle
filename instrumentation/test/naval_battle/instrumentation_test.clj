@@ -101,3 +101,37 @@
          (set (keys (:roles inst/aspect-provider)))))
   (is (= inst/target-revision
          (get-in inst/aspect-provider [:libraries 'casselc/naval-battle]))))
+
+(deftest frame-advice-draws-before-present-and-preserves-identities
+  (let [events (atom [])
+        result (Object.)]
+    (with-redefs [inst/draw-hud-fail-open! #(swap! events conj :draw)]
+      (is (identical? result
+                      (inst/around-frame
+                       {} [] #(do (swap! events conj :present) result))))
+      (is (= [:draw :present] @events)))
+    (let [error (ex-info "application present failed" {:private true})]
+      (with-redefs [inst/draw-hud-fail-open! (constantly nil)]
+        (try
+          (inst/around-frame {} [] #(throw error))
+          (is false "expected application exception")
+          (catch Throwable actual
+            (is (identical? error actual))))))))
+
+(deftest hud-drawing-fails-open-before-present
+  (let [calls (atom 0)
+        result (Object.)]
+    (with-redefs [inst/draw-hud-fail-open!
+                  #(inst/draw-hud-with-resolver-fail-open!
+                    (fn [] #(throw (ex-info "draw failed" {}))))]
+      (is (identical? result
+                      (inst/around-frame
+                       {} [] #(do (swap! calls inc) result))))
+      (is (= 1 @calls))))
+  (testing "a profile without the optional HUD namespace still presents"
+    (let [calls (atom 0)]
+      (with-redefs [inst/draw-hud-fail-open!
+                    #(inst/draw-hud-with-resolver-fail-open!
+                      (fn [] (throw (ex-info "not on classpath" {}))))]
+        (inst/around-frame {} [] #(swap! calls inc))
+        (is (= 1 @calls))))))

@@ -82,6 +82,68 @@ source. Its gates compare plain and woven behavior, validate all three OTLP
 signals, and confirm that a separate oscope process can receive, display,
 persist, reopen, and query the telemetry.
 
+### Opt-in embedded telemetry case study
+
+The woven telemetry build wraps the unchanged game entry point with an in-process
+OpenTelemetry SDK, a Durable local chDB store, and an oscope viewer bound only
+to loopback:
+
+```sh
+jolt native && jolt sea && jolt hull
+JOLT_CHDB_ROOT=/path/to/jolt-chdb \
+RAYLIB_LIB=/path/to/libraylib.so \
+  instrumentation/scripts/build_embedded.sh
+JOLT_CHDB_LIB=/path/to/qualified/libchdb.so \
+  target/telemetry/naval-battle
+# [voxel] embedded telemetry viewer: http://127.0.0.1:4320/oscope/telemetry
+```
+
+`build_embedded.sh` uses the aspect-capable Jolt compiler selected by
+`JOLT_ASPECT_JOLT`, embeds jolt-chdb's ABI descriptor, and verifies the original
+gameplay/native checksum manifest before and after the build. The ordinary
+`:telemetry` alias supplies the oscope dependency and launcher; running that
+alias directly is an unwoven diagnostic, not the instrumented game.
+
+The game-to-exporter path has no OTLP JSON, HTTP framing, or receiver. HTTP is
+used only for the adjacent human viewer. Data is stored under
+`./naval-telemetry` by default and survives a process restart. Override the
+non-secret launcher choices with `VOXEL_OTEL_STORAGE_ROOT`,
+`VOXEL_OTEL_OBJECT_ID`, and `VOXEL_OTEL_VIEWER_PORT` (use `0` for an ephemeral
+port). The viewer host is deliberately restricted to `127.0.0.1`.
+
+Durable chDB currently requires the separately qualified chDB core
+26.7.2-rc.2 ABI. The stable 26.7.0 library installed by default lacks that ABI;
+point `JOLT_CHDB_LIB` at the qualified library before using this profile.
+Box3D is fetched at the revision pinned in `deps.edn`; the Linux sea build also
+enables the libc feature definitions required for `M_PI` without changing the
+native simulation source.
+
+This profile is separate so ordinary builds and tests do not resolve oscope,
+chDB, or the OTel SDK. It is intended to be paired with the aspect-instrumented
+build: advice observes existing game/runtime call sites without adding
+telemetry calls to gameplay namespaces.
+
+The in-game HUD advice reads `voxel.telemetry.hud/snapshot`. A Jolt
+fiber schedules and publishes that immutable model once per second; one owned
+OS thread executes the two fixed six-row JDBC queries because the blocking
+Durable connection boundary cannot park a fiber while holding its connection
+lock. Shutdown joins both before oscope closes the source. The render thread
+never waits on chDB. Call advice on `voxel.raylib/end-drawing` from
+`voxel.render` draws a compact status plus at most three span and three metric
+rows while the frame is still open, then presents exactly once. HUD resolution,
+snapshot, formatting, and drawing failures are fail-open.
+
+This is phase two of the case study. Phase one keeps oscope in a separate
+process as the OTLP receiver/viewer and runs the woven game with the standard
+`OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME=naval-battle` settings.
+Phase two selects `:telemetry`, retains the same service/resource identity, and
+replaces only the exporter/collector transport with the in-process Durable
+composition.
+
+`sha256sum -c resources/telemetry/gameplay-source.sha256` verifies that every
+pre-existing gameplay namespace and native simulation source still matches the
+fork point used by this case study.
+
 ## Controls
 
 - Arrow keys steer your ship

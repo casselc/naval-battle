@@ -24,7 +24,8 @@
 
 (deftest exact-real-source-weave-report
   (let [report (edn/read-string
-                (slurp "../../target/instrumentation/aspects.edn"))
+                (slurp (or (System/getenv "NAVAL_ASPECT_REPORT")
+                           "../../target/instrumentation/aspects.edn")))
         actual
         (into {}
               (map (fn [aspect]
@@ -35,7 +36,8 @@
                       (:advice aspect)]))
               (:aspects report))]
     (testing "all and only the intended unchanged call and entry seams are woven"
-      (is (= expected actual)))
+      (is (= expected actual))
+      (is (= (count expected) (count (:aspects report)))))
     (testing "every manifest expectation resolves to exactly one physical site"
       (is (every? #(= 1 (count (:sites %))) (:aspects report))))
     (testing "the report is an observational, non-control build"

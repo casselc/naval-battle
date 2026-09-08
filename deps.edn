@@ -27,16 +27,27 @@
   ;; re-find rather than clojure.string, so :init needs nothing required.
   :init (do (def mac? (some? (re-find #"^Mac" (System/getProperty "os.name"))))
             (def lib (str "native/libvoxel_b3." (if mac? "dylib" "so")))
+            (def b3-revision "47d7f7cc7e091142c08d11dc7d2e493c5d34f536")
             (def b3-dir "vendor/box3d/build/bin")
+            (def b3-marker "vendor/box3d/.naval-battle-revision")
             (def b3-lib (str b3-dir "/libbox3d." (if mac? "dylib" "so"))))
 
   box3d
   {:doc "clone and build vendored Box3D (skipped once built)"
-   :task (if (fs/exists? b3-lib)
+   :task (if (and (fs/exists? b3-lib)
+                  (fs/exists? b3-marker)
+                  (= b3-revision (slurp b3-marker)))
            (println "box3d: up to date")
-           (do (when-not (fs/exists? "vendor/box3d")
-                 (shell "git" "clone" "--depth" "1"
-                        "https://github.com/erincatto/box3d.git" "vendor/box3d"))
+           (do (when-not (fs/exists? "vendor/box3d/.git")
+                 (fs/create-dirs "vendor/box3d")
+                 (shell "git" "-C" "vendor/box3d" "init")
+                 (shell "git" "-C" "vendor/box3d" "remote" "add" "origin"
+                        "https://github.com/erincatto/box3d.git"))
+               (shell "git" "-C" "vendor/box3d" "fetch" "--depth" "1"
+                      "origin" b3-revision)
+               (shell "git" "-C" "vendor/box3d" "checkout" "--detach"
+                      "FETCH_HEAD")
+               (spit b3-marker b3-revision)
                (shell "cmake" "-S" "vendor/box3d" "-B" "vendor/box3d/build"
                       "-DCMAKE_BUILD_TYPE=Release" "-DBUILD_SHARED_LIBS=ON"
                       "-DBOX3D_SAMPLES=OFF" "-DBOX3D_UNIT_TESTS=OFF"
@@ -71,7 +82,8 @@
            (if (and (fs/exists? sea-lib)
                     (empty? (fs/modified-since sea-lib [sea-src])))
              (println "sea: up to date -" sea-lib)
-             (do (shell "cc" "-O2" "-std=c11" "-shared" "-fPIC"
+             (do (shell "cc" "-O2" "-std=c11" "-D_DEFAULT_SOURCE"
+                        "-shared" "-fPIC"
                         (str "-I" (or (System/getenv "RAYLIB_INCLUDE")
                                       "/opt/homebrew/include"))
                         sea-src "-o" sea-lib
@@ -101,4 +113,23 @@
  :aliases {:test {:extra-paths ["test"]
                   :main-opts ["-m" "voxel.test-runner"]}
            :run  {:main-opts ["-m" "voxel.main"]}
-           :b3probe {:main-opts ["-m" "voxel.b3-probe"]}}}
+           :b3probe {:main-opts ["-m" "voxel.b3-probe"]}
+
+           ;; Opt-in only: the normal game and test profiles do not resolve
+           ;; chDB, oscope, or the OTel SDK. This launcher surrounds the
+           ;; unchanged game entry point with a Durable in-process collector
+           ;; and a read-only loopback viewer.
+           :telemetry
+           {:extra-deps
+             {io.github.chucklehead-dev/oscope
+             {:git/url "https://github.com/chucklehead-dev/oscope.git"
+              :git/sha "4770e817ad3821c9d060d4fe4dc6ef1f32bf0420"}}
+            :main-opts ["-m" "voxel.telemetry.main"]}
+
+           :test-telemetry
+           {:extra-paths ["test"]
+            :extra-deps
+            {io.github.chucklehead-dev/oscope
+             {:git/url "https://github.com/chucklehead-dev/oscope.git"
+              :git/sha "4770e817ad3821c9d060d4fe4dc6ef1f32bf0420"}}
+            :main-opts ["-m" "voxel.telemetry-test-runner"]}}}
