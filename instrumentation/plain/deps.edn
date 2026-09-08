@@ -1,0 +1,13 @@
+{:paths ["../../src" "../src" "../resources" "../test"]
+ :deps
+ {io.github.casselc/otel
+  {:git/url "https://github.com/casselc/otel.git"
+   :git/sha "c08164b213a855fa0613739cd1ba78ad60393a40"}
+  io.github.casselc/jolt-net
+  {:git/url "https://github.com/casselc/jolt-net.git"
+   :git/sha "aca0b9b9fe2bfb3f02b80c3b0ef4cc16f65a78ca"}}
+ :jolt/native [{:name "case-study-link-only"
+                :linux ["/lib/x86_64-linux-gnu/libc.so.6"]}]
+ :aliases
+ {:test {:main-opts ["-m" "naval-battle.instrumentation-test-runner"]}
+  :smoke {:main-opts ["-m" "naval-battle.instrumentation-smoke"]}}}

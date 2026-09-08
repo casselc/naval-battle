@@ -1,0 +1,25 @@
+{:paths ["../../src" "../src" "../resources" "../test"]
+ :deps
+ {io.github.casselc/otel
+  {:git/url "https://github.com/casselc/otel.git"
+   :git/sha "c08164b213a855fa0613739cd1ba78ad60393a40"}
+  ;; casselc/otel still reaches the pre-0.8 FFI write-order jolt-net through
+  ;; http-client. This exact published override is required for real OTLP on
+  ;; Jolt 0.8.x; without it numeric hosts fail resolution and localhost decodes
+  ;; a zero address family.
+  io.github.casselc/jolt-net
+  {:git/url "https://github.com/casselc/jolt-net.git"
+   :git/sha "aca0b9b9fe2bfb3f02b80c3b0ef4cc16f65a78ca"}}
+ ;; The deterministic test driver loads the real gameplay namespaces but never
+ ;; calls their native seams. libc is therefore an explicit link-only stand-in;
+ ;; the playable build continues to use the native declarations in ../../deps.edn.
+ :jolt/native [{:name "case-study-link-only"
+                :linux ["/lib/x86_64-linux-gnu/libc.so.6"]}]
+ :jolt/build
+ {:aspects
+  [{:resource "META-INF/jolt/aspects/packs/naval-battle-6839a80.edn"
+    :provider naval-battle.instrumentation/aspect-provider}]
+  :aspect-report "../../target/instrumentation/aspects.edn"}
+ :aliases
+ {:test {:main-opts ["-m" "naval-battle.instrumentation-test-runner"]}
+  :smoke {:main-opts ["-m" "naval-battle.instrumentation-smoke"]}}}
