@@ -1,0 +1,89 @@
+name: fork-local instrumentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/instrumentation.yml
+      - instrumentation/**
+      - src/voxel/**
+      - native/**
+  pull_request:
+    paths:
+      - .github/workflows/instrumentation.yml
+      - instrumentation/**
+      - src/voxel/**
+      - native/**
+
+permissions:
+  contents: read
+
+jobs:
+  external-oscope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      JOLT_CACHE_DIR: ${{ github.workspace }}/.jolt-cache-v0.8.3
+      JOLT_GITLIBS_DIR: ${{ github.workspace }}/.jolt-gitlibs-v0.8.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout aspect-capable Jolt compiler
+        uses: actions/checkout@v4
+        with:
+          repository: casselc/jolt
+          ref: 5d56b9e5d295fe0968df07e535c45353050611f7
+          path: .qualification/jolt
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Checkout oscope receiver
+        uses: actions/checkout@v4
+        with:
+          repository: chucklehead-dev/oscope
+          ref: 4770e817ad3821c9d060d4fe4dc6ef1f32bf0420
+          path: .qualification/oscope
+          persist-credentials: false
+
+      - name: Checkout chDB native qualification
+        uses: actions/checkout@v4
+        with:
+          repository: chucklehead-dev/jolt-chdb
+          ref: 3ef8d97b62b467f1ad68f92b854498c124cb8811
+          path: .qualification/jolt-chdb
+          persist-credentials: false
+
+      - name: Install Jolt v0.8.3
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/jolt-bin"
+          curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/v0.8.3/install \
+            | bash -s -- --dir "$install_dir" --version 0.8.3
+          echo "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Assert Jolt version
+        run: test "$(jolt --version)" = "jolt v0.8.3"
+
+      - name: Provision pinned Chez and aspect compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends uuid-dev
+          make -C .qualification/jolt deps JOLT_SYSTEM_CHEZ=
+          test "$(.qualification/jolt/bin/jolt --version)" = "jolt v0.8.3-41-g5d56b9e5"
+
+      - name: Qualify chDB native library
+        working-directory: .qualification/jolt-chdb
+        run: scripts/qualify-durable-native.sh "$RUNNER_TEMP/chdb-durable"
+
+      - name: Verify exact advice and external OTLP
+        env:
+          JOLT_ASPECT_JOLT: ${{ github.workspace }}/.qualification/jolt/bin/jolt
+        run: instrumentation/scripts/verify.sh
+
+      - name: Verify separate-process oscope persistence
+        env:
+          JOLT_CHDB_LIB: ${{ runner.temp }}/chdb-durable/native/libchdb.so
+          JOLT_ASPECT_JOLT: ${{ github.workspace }}/.qualification/jolt/bin/jolt
+          OSCOPE_ROOT: ${{ github.workspace }}/.qualification/oscope
+        run: instrumentation/scripts/verify_oscope.sh
