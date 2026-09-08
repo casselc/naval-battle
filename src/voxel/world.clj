@@ -38,6 +38,24 @@
 (def SHELL-GRAVITY 6.0)
 (def GUN-RANGE (/ (* SHELL-SPEED SHELL-SPEED) SHELL-GRAVITY))
 
+;; Hold the trigger to charge: the charge sets muzzle speed, and muzzle speed
+;; sets how far she throws. A tap still puts a shell in the air - the reach
+;; of one is short, not nothing, so the trigger always does something you can
+;; see.
+(def MIN-CHARGE 0.55)   ; muzzle speed of an uncharged shot, as a fraction
+
+(defn charge-speed
+  "Muzzle speed for a charge in [0,1]."
+  [power]
+  (* SHELL-SPEED (+ MIN-CHARGE (* (- 1.0 MIN-CHARGE)
+                                  (max 0.0 (min 1.0 (double power)))))))
+
+(defn gun-reach
+  "How far a shot at this charge carries over level water."
+  [power]
+  (let [v (charge-speed power)]
+    (/ (* v v) SHELL-GRAVITY)))
+
 (def FIRE-COOLDOWN 3.0)
 (def BLAST-RADIUS 2.2)
 ;; She is gone when her keel is this far under - which has to be measured
@@ -139,8 +157,8 @@
           (:guns ship)))
 
 (defn- aim-velocity
-  "Muzzle velocity that lands a shell at target from p0 at the given speed:
-  the low-arc ballistic solution, nil when the target is out of range."
+  "Muzzle velocity that lands a shell exactly on target from p0 at the given
+  speed: the low-arc ballistic solution, nil when the target is out of reach."
   [p0 p1 speed]
   (let [dx (- (p1 0) (p0 0)) dy (- (p1 1) (p0 1)) dz (- (p1 2) (p0 2))
         d (Math/sqrt (+ (* dx dx) (* dz dz)))
@@ -153,44 +171,64 @@
             sin (* tan cos)]
         [(* speed cos (/ dx d)) (* speed sin) (* speed cos (/ dz d))]))))
 
+(defn- lob-velocity
+  "The longest throw a gun has at this speed: forty-five degrees toward the
+  target. What she does when the aim point is past her reach."
+  [p0 p1 speed]
+  (let [dx (- (p1 0) (p0 0)) dz (- (p1 2) (p0 2))
+        d (Math/sqrt (+ (* dx dx) (* dz dz)))
+        c (* speed (Math/sqrt 0.5))]
+    (if (< d 1e-6)
+      [0.0 speed 0.0]
+      [(* c (/ dx d)) c (* c (/ dz d))])))
+
+(defn firing-solution
+  "Muzzle velocity for a shot at target: the low arc when it is in reach,
+  and the longest throw she has when it is not. Never nil - a gun that can
+  be fired is a gun that fires, and a round falling short in front of the
+  target says more than a click that does nothing."
+  [p0 p1 speed]
+  (or (aim-velocity p0 p1 speed) (lob-velocity p0 p1 speed)))
+
 (defn fire
-  "Fire the ship's nearest gun at target [x y z] on the low ballistic arc
-  for SHELL-SPEED. The state is returned unchanged when the battle is over,
-  the ship is sunk or cooling down, or no ballistic solution exists."
-  [state id target]
-  (let [s (get-in state [:ships id])]
-    (if (or (not= :playing (:phase state))
-            (:sunk s)
-            (pos? (or (:cooldown s) 0.0)))
-      state
-      (let [m (muzzle-point s (nearest-gun s target))
-            v (aim-velocity m target SHELL-SPEED)]
-        (if (nil? v)
-          state
-          (-> state
-              (update :shells conj {:owner id :pos m :vel v :t 0.0 :from m})
-              (assoc-in [:ships id :cooldown] FIRE-COOLDOWN)
-              (update :events conj {:type :fired :ship id})))))))
+  "Fire the ship's nearest gun at target [x y z] at the given muzzle speed
+  (default full charge). The state is returned unchanged only when there is
+  no gun to fire: the battle is over, the ship is sunk, or she is reloading."
+  ([state id target] (fire state id target SHELL-SPEED))
+  ([state id target speed]
+   (let [s (get-in state [:ships id])]
+     (if (or (not= :playing (:phase state))
+             (:sunk s)
+             (pos? (or (:cooldown s) 0.0)))
+       state
+       (let [m (muzzle-point s (nearest-gun s target))
+             v (firing-solution m target speed)]
+         (-> state
+             (update :shells conj {:owner id :pos m :vel v :t 0.0 :from m})
+             (assoc-in [:ships id :cooldown] FIRE-COOLDOWN)
+             (update :events conj {:type :fired :ship id})))))))
 
 (defn preview-arc
-  "Closed-form sample of the shot `fire` would take at target right now:
-  points from the muzzle to the first sea crossing, nil when the guns are
-  cooling or no ballistic solution exists. The aim reticle draws these."
-  [state id target]
-  (let [s (get-in state [:ships id])]
-    (when (and (= :playing (:phase state))
-               (not (:sunk s))
-               (not (pos? (or (:cooldown s) 0.0))))
-      (let [m (muzzle-point s (nearest-gun s target))
-            v (aim-velocity m target SHELL-SPEED)]
-        (when v
-          (loop [t 0.0 pts []]
-            (let [p [(+ (m 0) (* (v 0) t))
-                     (+ (m 1) (* (v 1) t) (* -0.5 SHELL-GRAVITY t t))
-                     (+ (m 2) (* (v 2) t))]]
-              (if (or (<= (p 1) 0.0) (> t 8.0))
-                (conj pts p)
-                (recur (+ t 0.05) (conj pts p))))))))))
+  "Closed-form sample of the shot `fire` would take at target at this charge:
+  points from the muzzle to the first sea crossing.
+
+  Drawn whatever the guns are doing - reloading included - so a player can
+  line up the next salvo while waiting for it, and can see a short charge
+  fall short before spending it. Only a ship with no gun at all (sunk, or the
+  battle over) has no arc."
+  ([state id target] (preview-arc state id target SHELL-SPEED))
+  ([state id target speed]
+   (let [s (get-in state [:ships id])]
+     (when (and (= :playing (:phase state)) (not (:sunk s)))
+       (let [m (muzzle-point s (nearest-gun s target))
+             v (firing-solution m target speed)]
+         (loop [t 0.0 pts []]
+           (let [p [(+ (m 0) (* (v 0) t))
+                    (+ (m 1) (* (v 1) t) (* -0.5 SHELL-GRAVITY t t))
+                    (+ (m 2) (* (v 2) t))]]
+             (if (or (and (pos? t) (<= (p 1) 0.0)) (> t 12.0))
+               (conj pts p)
+               (recur (+ t 0.05) (conj pts p))))))))))
 
 ;; --- shell flight ----------------------------------------------------------------
 
@@ -457,10 +495,13 @@
 
 (defn- ai-engage
   [st id]
-  (let [foe (first (remove :sunk (map val (dissoc (:ships st) id))))]
-    (if (nil? foe)
+  (let [s (get-in st [:ships id])
+        foe (first (remove :sunk (map val (dissoc (:ships st) id))))]
+    ;; a gun always fires now, so she has to decide not to: a shell lobbed at
+    ;; something she cannot reach is three seconds of reload for a splash
+    (if (or (nil? foe) (> (flat-range (:pos s) (:pos foe)) GUN-RANGE))
       st
-      (fire st id (aim-point (get-in st [:ships id]) foe)))))
+      (fire st id (aim-point s foe)))))
 
 (defn- ai-turn
   [st]

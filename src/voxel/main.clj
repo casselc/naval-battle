@@ -140,6 +140,7 @@
            screen (if autofire-frame :game :title)
            debris []
            consumed 0
+           charge 0.0
            ttotal 0.0]
       (if (rl/keep-running? deadline)
         (let [t0 (System/currentTimeMillis)
@@ -180,11 +181,26 @@
                              (let [e (get-in world [:ships :enemy :pos])]
                                [(e 0) (+ (e 1) 1.0) (e 2)])
                              aim)
-               fire-now (or autofire?
-                            (and (= :game screen)
-                                 (:released? in)
-                                 (= :playing (:phase world))))
-               world (if fire-now (w/fire world :player fire-target) world)
+               ;; Hold to charge, release to fire. The charge only builds
+               ;; once the gun is up, so holding through a reload is not a
+               ;; wasted hold - it starts the moment she is ready.
+               gun-ready? (and (= :game screen)
+                               (= :playing (:phase world))
+                               (not (get-in world [:ships :player :sunk]))
+                               (<= (get-in world [:ships :player :cooldown] 0.0)
+                                   0.0))
+               charge-now (if (and gun-ready? (:down? in))
+                            (min 1.0 (+ charge (/ dt input/CHARGE-TIME)))
+                            charge)
+               fire-now (or autofire? (and gun-ready? (:released? in)))
+               ;; a tap is a short shot, never a dead trigger
+               power (if autofire? 1.0 charge-now)
+               world (if fire-now
+                       (w/fire world :player fire-target (w/charge-speed power))
+                       world)
+               charge' (if (or fire-now (not gun-ready?) (not (:down? in)))
+                         0.0
+                         charge-now)
                 ;; the helm: arrow keys drive the player's hull (the smoke
                 ;; env overrides the keyboard so scripted runs can steer)
                 helm (or smoke-helm (:helm in))
@@ -241,7 +257,8 @@
                tsim (- (System/currentTimeMillis) t0)
                tdraw0 (System/currentTimeMillis)]
           (render/draw-frame! {:world world
-                               :ui {:aim aim :mx (:mx in) :my (:my in)}
+                               :ui {:aim aim :mx (:mx in) :my (:my in)
+                                    :charge charge-now :ready? gun-ready?}
                                :debris debris'
                                :camera camera
                                :width WIDTH :height HEIGHT
@@ -262,7 +279,8 @@
             :avg-sim-ms (when (pos? frame) (/ @sim-work* frame 1.0))
             :avg-draw-ms (when (pos? frame) (/ @draw-work* frame 1.0))
             :avg-phys-ms (when (pos? frame) (/ @phys-work* frame 1.0))})
-          (recur (inc frame) world screen debris' consumed' (+ ttotal dt)))
+          (recur (inc frame) world screen debris' consumed' charge'
+                 (+ ttotal dt)))
         (when autofire-frame
           (println "[voxel] smoke summary:" (pr-str @summary))))))
   (rl/close-window))

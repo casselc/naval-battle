@@ -75,10 +75,18 @@
       (is (empty? (:shells (peek hist))) "the shell splashes and is spent")
       (is (< (apply min (map #(dist (:pos %) target) flights)) 1.0)
           "the arc passes within a metre of the aim point")))
-  (testing "out of range there is no solution"
-    (let [st (w/fire (rigged) :player [0.0 1.0 300.0])]
-      (is (empty? (:shells st)))
-      (is (zero? (get-in st [:ships :player :cooldown]))))))
+  (testing "out of range she still fires, as far as the gun will throw"
+    ;; returning the state untouched here is what made the trigger feel
+    ;; broken: past a full-power shot's reach - most of the visible sea - the
+    ;; click produced no shell and nothing to say why
+    (let [st (w/fire (rigged) :player [0.0 1.0 300.0])
+          v (:vel (first (:shells st)))]
+      (is (= 1 (count (:shells st))))
+      (is (pos? (get-in st [:ships :player :cooldown])))
+      (is (< (Math/abs (- (Math/sqrt (+ (* (v 0) (v 0)) (* (v 2) (v 2))))
+                          (v 1)))
+             1e-9)
+          "elevated to forty-five degrees, her longest throw"))))
 
 (deftest shells-carve-the-hull-where-they-land
   (let [st (w/fire (rigged) :player [0.0 1.0 14.0])
@@ -332,3 +340,121 @@
                                  {:pos [5.0 0.0 20.0] :vel [0.0 0.0 0.0]})]
       (is (< (Math/abs (- ax 5.0)) 1e-9))
       (is (< (Math/abs (- az 20.0)) 1e-9)))))
+
+
+;; --- the trigger ------------------------------------------------------------
+;;
+;; Pressing fire has to do something every single time. It used to return the
+;; state unchanged whenever the aim point was past what a full-power shot
+;; could reach - which is most of the visible sea - so the click vanished with
+;; no shell, no splash and nothing on the HUD to say why.
+
+(defn- ready-player
+  []
+  (-> (w/initial-state)
+      (assoc-in [:ships :player :pos] [0.0 -3.0 0.0])
+      (assoc-in [:ships :player :cooldown] 0.0)
+      ;; a one-particle pond: these tests fly shells by stepping the world,
+      ;; and the real ocean is nine thousand particles a step
+      (assoc :ocean (sea/make-ocean [{:x 0.0 :z 0.0 :omega 0.0}]))
+      ;; and the enemy hove well over the horizon, so a lobbed round comes
+      ;; down on water rather than on her deck
+      (assoc-in [:ships :enemy :pos] [0.0 -3.0 400.0])))
+
+(defn- shots-of [st] (count (:shells st)))
+
+(deftest the-trigger-always-sends-a-shell
+  (testing "at any aim point, near or far past gun range, at any charge"
+    (doseq [target [[0.0 0.0 8.0] [0.0 0.0 30.0] [0.0 0.0 42.0]
+                    [0.0 0.0 90.0] [70.0 0.0 -70.0] [-120.0 0.0 40.0]]
+            power [0.0 0.25 0.6 1.0]]
+      (let [st (w/fire (ready-player) :player target (w/charge-speed power))]
+        (is (= 1 (shots-of st))
+            (str "no shell for " target " at charge " power))
+        (is (some #(= :fired (:type %)) (:events st))))))
+  (testing "and it still refuses when there is genuinely no gun to fire"
+    (let [reloading (assoc-in (ready-player) [:ships :player :cooldown] 1.5)
+          sunk (assoc-in (ready-player) [:ships :player :sunk] true)
+          over (assoc (ready-player) :phase :over)]
+      (doseq [st [reloading sunk over]]
+        (is (zero? (shots-of (w/fire st :player [0.0 0.0 20.0]))))))))
+
+(deftest a-shot-beyond-reach-falls-short-rather-than-vanishing
+  (testing "out of range, the gun throws it as far as it will go"
+    (let [near (w/fire (ready-player) :player [0.0 0.0 200.0] w/SHELL-SPEED)
+          shell (first (:shells near))
+          v (:vel shell)
+          ;; 45 degrees is the longest throw for a given muzzle speed
+          horiz (Math/sqrt (+ (* (v 0) (v 0)) (* (v 2) (v 2))))]
+      (is (< (Math/abs (- horiz (v 1))) 1e-9)
+          "elevated to the maximum-range angle")
+      (is (< (Math/abs (- (Math/sqrt (+ (* horiz horiz) (* (v 1) (v 1))))
+                          w/SHELL-SPEED))
+             1e-9)
+          "at full muzzle speed")
+      (is (pos? (v 2)) "and pointed at the target"))))
+
+;; --- charge -----------------------------------------------------------------
+
+(deftest holding-the-trigger-throws-the-shell-further
+  (testing "charge sets muzzle speed, and muzzle speed sets reach"
+    (is (< (w/charge-speed 0.0) (w/charge-speed 0.5) (w/charge-speed 1.0)))
+    (is (= w/SHELL-SPEED (w/charge-speed 1.0)) "full charge is full power")
+    (is (> (w/charge-speed 0.0) 0.0) "and a tap still fires a shell"))
+  (testing "the reach of a charge is its speed squared over shell gravity"
+    (doseq [p [0.0 0.4 1.0]]
+      (let [v (w/charge-speed p)]
+        (is (< (Math/abs (- (w/gun-reach p) (/ (* v v) w/SHELL-GRAVITY))) 1e-9)))))
+  (testing "a half charge cannot reach as far as a full one"
+    (is (< (w/gun-reach 0.3) (w/gun-reach 1.0)))
+    (is (= w/GUN-RANGE (w/gun-reach 1.0)))))
+
+;; --- the dotted line --------------------------------------------------------
+
+(deftest the-preview-is-always-there-and-tells-the-truth
+  (testing "drawn whatever the guns are doing, so the player can always aim"
+    (doseq [st [(ready-player)
+                (assoc-in (ready-player) [:ships :player :cooldown] 2.0)]
+            target [[0.0 0.0 25.0] [0.0 0.0 150.0]]]
+      (is (seq (w/preview-arc st :player target w/SHELL-SPEED))
+          (str "no arc for " target))))
+  (testing "it ends where the shell actually lands"
+    (doseq [target [[0.0 0.0 18.0] [0.0 0.0 38.0] [0.0 0.0 120.0]]
+            power [0.4 1.0]]
+      (let [speed (w/charge-speed power)
+            st (ready-player)
+            arc (w/preview-arc st :player target speed)
+            end (peek arc)
+            ;; fly the real shell and see where it splashes
+            fired (w/fire st :player target speed)
+            splash (loop [s fired n 0]
+                     (let [s' (w/step-state s 0.02 {:bodies []})
+                           ev (first (filter #(#{:splash :blast} (:type %))
+                                             (drop (count (:events s))
+                                                   (:events s'))))]
+                       (cond ev (:point ev)
+                             (> n 400) nil
+                             :else (recur s' (inc n)))))]
+        (is splash (str "the shell never came down for " target))
+        (is (< (Math/sqrt (+ (* (- (end 0) (splash 0)) (- (end 0) (splash 0)))
+                             (* (- (end 2) (splash 2)) (- (end 2) (splash 2)))))
+               1.0)
+            (str "the dotted line lies: preview " end " vs splash " splash)))))
+  (testing "a fuller charge draws a longer arc"
+    (let [st (ready-player)
+          reach (fn [p] (let [a (w/preview-arc st :player [0.0 0.0 200.0]
+                                               (w/charge-speed p))]
+                          (Math/abs ((peek a) 2))))]
+      (is (< (reach 0.2) (reach 0.6) (reach 1.0))))))
+
+(deftest the-ai-does-not-waste-shells-it-cannot-reach-with
+  (testing "she holds fire outside her own gun range"
+    (let [far (-> (ready-player)
+                  (assoc-in [:ships :enemy :pos] [0.0 -3.0 0.0])
+                  (assoc-in [:ships :enemy :cooldown] 0.0)
+                  (assoc-in [:ships :player :pos] [0.0 -3.0 90.0]))
+          near (assoc-in far [:ships :player :pos] [0.0 -3.0 25.0])]
+      (is (zero? (count (:shells (w/step-state far 0.02 {:bodies []}))))
+          "90 units off, against a 42-unit reach")
+      (is (pos? (count (:shells (w/step-state near 0.02 {:bodies []}))))
+          "in range she opens up"))))

@@ -77,8 +77,11 @@ of a run.
 ## Controls
 
 - Arrow keys steer your ship
-- Move the mouse to aim; the dotted arc previews the shot
-- Click to fire
+- Move the mouse to aim; the dotted arc always shows where the shot will
+  land, dimmed while the gun is reloading
+- Hold the left button to charge and release to fire — the charge sets muzzle
+  speed, so it sets how far she throws. A tap still puts a shell in the air,
+  just a short one, and the arc shows you that before you spend it
 - `R` restarts after a battle ends
 
 The enemy works to hold a standoff near the edge of her reach rather than

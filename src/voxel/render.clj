@@ -158,12 +158,17 @@
     (rl/sphere! :pos pos :radius 0.3 :rings 8 :slices 12 :color rl/DARKGRAY)))
 
 (defn- draw-arc!
-  "Dotted ballistic preview to the aim point, when the guns are ready and a
-  solution exists."
-  [world target]
-  (when-let [pts (w/preview-arc world :player target)]
+  "Dotted ballistic preview of the shot at the current charge - always drawn,
+  so a player can line the next salvo up while the gun reloads and can see a
+  short charge fall short before spending it. Dimmed while she is reloading,
+  because that shot cannot be taken yet."
+  [world target charge ready?]
+  (when-let [pts (w/preview-arc world :player target (w/charge-speed charge))]
+    (rl/rl-set-blend rl/GL-SRC-ALPHA rl/GL-ONE-MINUS-SRC-ALPHA rl/GL-FUNC-ADD)
     (rl/rl-begin rl/RL-LINES)
-    (rl/rl-color! rl/WHITE)
+    (rl/rl-color! (if ready?
+                    (rl/rgba 255 246 210 255)
+                    (rl/rgba 225 235 250 150)))
     (doseq [[[x1 y1 z1] [x2 y2 z2]] (partition 2 2 pts)]
       (rl/rl-vertex-3f (double x1) (double y1) (double z1))
       (rl/rl-vertex-3f (double x2) (double y2) (double z2)))
@@ -183,19 +188,29 @@
     (rl/cube! :pos [x y z] :size size :color color)))
 
 (defn- draw-hud!
-  [world width height]
+  [world ui width height]
   (let [player (get-in world [:ships :player])
         enemy (get-in world [:ships :enemy])
         cd (or (:cooldown player) 0.0)
         ready? (<= cd 0.0)
+        charge (or (:charge ui) 0.0)
+        charging? (and ready? (pos? charge))
         bar-w 220
-        frac (max 0.0 (min 1.0 (- 1.0 (/ cd w/FIRE-COOLDOWN))))
+        ;; one bar, two jobs: how much of the reload is done, then how much
+        ;; of the charge is in hand
+        frac (if ready? charge (max 0.0 (min 1.0 (- 1.0 (/ cd w/FIRE-COOLDOWN)))))
         right (fn [s size]
                 (- width 14 (rl/text-width s :size size)))]
-    (rl/text! (if ready? "GUNS READY" "RELOADING")
-              :x 14 :y 14 :size 20 :color (if ready? rl/GREEN rl/YELLOW))
+    (rl/text! (cond (not ready?) "RELOADING"
+                    charging? "CHARGING - RELEASE TO FIRE"
+                    :else "GUNS READY - HOLD TO CHARGE")
+              :x 14 :y 14 :size 20
+              :color (cond (not ready?) rl/YELLOW
+                           charging? rl/GOLD
+                           :else rl/GREEN))
     (rl/rect! :x 14 :y 40 :width bar-w :height 10 :color rl/DARKGRAY)
-    (rl/rect! :x 14 :y 40 :width (int (* bar-w frac)) :height 10 :color rl/GREEN)
+    (rl/rect! :x 14 :y 40 :width (int (* bar-w frac)) :height 10
+              :color (if charging? rl/GOLD rl/GREEN))
     (rl/text! (str "YOUR HULL  " (count (:cells player)) " cells")
               :x 14 :y 62 :size 18 :color rl/WHITE)
     (let [es (if (:sunk enemy)
@@ -205,7 +220,7 @@
                 :color (if (:sunk enemy) rl/RED rl/WHITE)))
     (let [ss (str "SHELLS IN FLIGHT  " (count (:shells world)))]
       (rl/text! ss :x (right ss 16) :y 40 :size 16 :color rl/LIGHTGRAY))
-    (rl/text! "aim with the mouse - LMB to fire - R restart"
+    (rl/text! "aim with the mouse - hold LMB to charge, release to fire - R restart"
               :x 14 :y (- height 24) :size 16 :color rl/LIGHTGRAY)))
 
 (defn- draw-crosshair!
@@ -247,10 +262,10 @@
       (draw-shells! (:shells world))
       (when (= :game screen)
         (draw-aim! (:aim ui))
-        (draw-arc! world (:aim ui)))
+        (draw-arc! world (:aim ui) (or (:charge ui) 0.0) (:ready? ui)))
       (draw-debris! debris)))
   (when (= :game screen)
-    (draw-hud! world width height)
+    (draw-hud! world ui width height)
     (draw-crosshair! (:mx ui) (:my ui)))
   (when (= :title screen)
     (draw-overlay! "NAVAL BATTLE"
