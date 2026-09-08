@@ -4,6 +4,7 @@
             [oscope.sample :as sample]
             [voxel.telemetry.config :as config]
             [voxel.telemetry.hud :as hud]
+            [voxel.telemetry.hud-overlay :as overlay]
             [voxel.telemetry.runtime :as runtime]
             [voxel.telemetry.viewer :as viewer]))
 
@@ -126,12 +127,13 @@
                 (if (or (= :ready (:status model)) (zero? remaining))
                   model
                   (do (Thread/sleep 10) (recur (dec remaining))))))
+            _ (is (true? (hud/stop! sampler)))
             before @calls
             second-read (hud/snapshot sampler)]
         (is (= :ready (:status first-read)))
         (is (= first-read second-read))
         (is (= before @calls)
-            "render-side snapshots do not invoke the query function"))
+            "snapshot does not invoke the query function"))
       (finally
         (is (true? (hud/stop! sampler)))))))
 
@@ -146,6 +148,50 @@
     (is (= 42 (:sampled-at-unix-ms model)))
     (is (= [hud/span-selection hud/metric-selection] @selections))
     (is (every? #(= 6 (:limit %)) @selections))))
+
+(deftest hud-overlay-reads-one-snapshot-and-draws-a-bounded-model
+  (let [snapshots (atom 0)
+        calls (atom [])
+        rows (mapv (fn [n] {:value (str "row-" n) :count n}) (range 20))]
+    (with-redefs [hud/snapshot
+                  (fn []
+                    (swap! snapshots inc)
+                    {:status :ready :spans rows :metrics rows})
+                  voxel.raylib/draw-rectangle
+                  #(swap! calls conj [:background %1 %2 %3 %4 %5])
+                  voxel.raylib/draw-rectangle-lines
+                  #(swap! calls conj [:border %1 %2 %3 %4 %5])
+                  voxel.raylib/draw-text
+                  #(swap! calls conj [:text %1 %2 %3 %4 %5])]
+      (is (nil? (overlay/draw-current!)))
+      (is (= 1 @snapshots))
+      (is (= 11 (count @calls)))
+      (is (= 9 (count (filter #(= :text (first %)) @calls)))))))
+
+(deftest hud-line-model-is-bounded-for-arbitrary-shaped-rows
+  ;; A deterministic property sweep covers absent, malformed, oversized, and
+  ;; newline-bearing values without adding a native generator to this profile.
+  (doseq [status [:ready :stale :starting :unknown nil]
+          row-count [0 1 3 4 20]
+          value [nil "" "normal" "line\nbreak" (apply str (repeat 100 "x"))]
+          count-value [nil -7 0 12 1000000000000 "many"]]
+    (let [rows (vec (repeat row-count {:value value :count count-value}))
+          lines (overlay/model-lines {:status status
+                                      :spans rows
+                                      :metrics rows})]
+      (is (<= (count lines) 9))
+      (is (every? #(not (re-find #"[\r\n\t]" %)) lines))
+      (is (every? #(<= (count %) 45) lines)))))
+
+(deftest inactive-hud-does-not-issue-draw-calls
+  (with-redefs [hud/snapshot (constantly nil)
+                voxel.raylib/draw-rectangle
+                (fn [& _] (throw (ex-info "unexpected draw" {})))
+                voxel.raylib/draw-rectangle-lines
+                (fn [& _] (throw (ex-info "unexpected draw" {})))
+                voxel.raylib/draw-text
+                (fn [& _] (throw (ex-info "unexpected draw" {})))]
+    (is (nil? (overlay/draw-current!)))))
 
 (deftest environment-configuration-is-bounded-and-explicit
   (let [env {"VOXEL_OTEL_VIEWER_PORT" "0"

@@ -119,7 +119,37 @@
                     (safe-game-phase (get-in frame [:world :phase]))
                     proceed))
 
+(defonce ^:private hud-renderer
+  ;; Resolve once, including absence. A headless or phase-one build must not do
+  ;; namespace lookup (or throw for a namespace omitted from its executable)
+  ;; on every frame.
+  (delay
+    (try
+      (requiring-resolve 'voxel.telemetry.hud-overlay/draw-current!)
+      (catch :default _ nil))))
+
+(defn draw-hud-with-resolver-fail-open!
+  "Resolve and invoke the optional renderer without leaking either failure."
+  [resolve-renderer]
+  (try
+    (when-let [draw! (resolve-renderer)]
+      (draw!))
+    (catch :default _ nil))
+  nil)
+
+(defn draw-hud-fail-open!
+  "Draw the cached telemetry HUD when its fork-local renderer is available.
+
+  Advice must never make frame presentation depend on telemetry. Resolution,
+  snapshot, formatting, and native drawing failures are therefore contained."
+  []
+  (draw-hud-with-resolver-fail-open! #(force hud-renderer)))
+
 (defn around-frame [_join-point _args proceed]
+  ;; This advice wraps voxel.raylib/end-drawing at its call site in
+  ;; voxel.render. Drawing before proceed keeps the overlay inside the current
+  ;; raylib frame; proceed presents that frame exactly once.
+  (draw-hud-fail-open!)
   (let [result (proceed)]
     (try (metrics/add! (:frames (instruments)) 1) (catch :default _ nil))
     result))

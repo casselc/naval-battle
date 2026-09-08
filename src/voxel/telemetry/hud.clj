@@ -104,7 +104,7 @@
 
 (defn snapshot
   "Return the cached immutable model. This function never queries chDB."
-  ([] (if-let [sampler @active*] @(:model sampler) empty-model))
+  ([] (when-let [sampler @active*] @(:model sampler)))
   ([sampler] @(:model sampler)))
 
 (defn stop!

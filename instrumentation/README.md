@@ -37,10 +37,12 @@ cursor or aim coordinates, world positions, voxel cells, body identifiers,
 player identity, file paths, or exception messages.
 
 The current smoke workload executes real pure game transitions and compiles all
-nine seams, but deliberately does not invoke native physics or rendering. A
-playable Xvfb/raylib acceptance and the cached in-game HUD are phase two. The
-separate-process oscope route remains phase one; embedded Durable export should
-reuse the same service and instrument identity.
+nine seams, but deliberately does not invoke native physics or rendering. The
+phase-two advice at the frame-present seam now resolves the fork-local HUD only
+when the embedded launcher retains it, draws its cached bounded model before
+`EndDrawing`, and fails open before presenting the frame. The separate-process
+oscope route remains phase one and does not resolve oscope or the HUD. A
+playable Xvfb/raylib run remains the final native visual acceptance gate.
 
 To prove the application sources remain untouched:
 

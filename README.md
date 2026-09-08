@@ -109,13 +109,15 @@ chDB, or the OTel SDK. It is intended to be paired with the aspect-instrumented
 build: advice observes existing game/runtime call sites without adding
 telemetry calls to gameplay namespaces.
 
-The optional in-game HUD advice reads `voxel.telemetry.hud/snapshot`. A Jolt
+The in-game HUD advice reads `voxel.telemetry.hud/snapshot`. A Jolt
 fiber schedules and publishes that immutable model once per second; one owned
 OS thread executes the two fixed six-row JDBC queries because the blocking
 Durable connection boundary cannot park a fiber while holding its connection
 lock. Shutdown joins both before oscope closes the source. The render thread
-never waits on chDB. The intended join point is call advice on
-`voxel.raylib/end-drawing` from `voxel.render`, while the frame is still open.
+never waits on chDB. Call advice on `voxel.raylib/end-drawing` from
+`voxel.render` draws a compact status plus at most three span and three metric
+rows while the frame is still open, then presents exactly once. HUD resolution,
+snapshot, formatting, and drawing failures are fail-open.
 
 This is phase two of the case study. Phase one keeps oscope in a separate
 process as the OTLP receiver/viewer and runs the woven game with the standard
