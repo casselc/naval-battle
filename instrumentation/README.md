@@ -41,8 +41,10 @@ nine seams, but deliberately does not invoke native physics or rendering. The
 phase-two advice at the frame-present seam now resolves the fork-local HUD only
 when the embedded launcher retains it, draws its cached bounded model before
 `EndDrawing`, and fails open before presenting the frame. The separate-process
-oscope route remains phase one and does not resolve oscope or the HUD. A
-playable Xvfb/raylib run remains the final native visual acceptance gate.
+oscope route remains phase one: the HUD code may resolve from the shared source
+tree, but stays dormant because no embedded sampler is active, and oscope/chDB
+remain outside that application process. A playable Xvfb/raylib run remains
+the final native visual acceptance gate.
 
 To prove the application sources remain untouched:
 
