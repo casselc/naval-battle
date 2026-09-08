@@ -24,15 +24,31 @@
 
 (def GRAVITY 25.0)
 (def BALL-RADIUS 0.5)
-(def SHELL-SPEED 30.0)
+
+;; Shells fly here, not in Box3D, so they get their own gravity - and that
+;; is the knob that decides whether a ship can be missed. Gun range is
+;; v^2/g and time of flight is about d/v, so holding v^2/g fixed while
+;; lowering both keeps the range and the shape of the arc exactly as they
+;; were and just gives the shell longer in the air. At 30 m/s a round
+;; crossed the arena in 1.2s, which is less time than a dreadnought needs to
+;; move her own beam - every shot with a decent lead connected, and evading
+;; was pointless. These give 2.1s at fighting range for the same 36-unit
+;; reach.
+(def SHELL-SPEED 16.0)
+(def SHELL-GRAVITY 6.0)
+(def GUN-RANGE (/ (* SHELL-SPEED SHELL-SPEED) SHELL-GRAVITY))
+
 (def FIRE-COOLDOWN 3.0)
 (def BLAST-RADIUS 2.6)
 (def SUNK-DEPTH 6.0)
-(def SHELL-LIFETIME 12.0)
-;; 56 units apart: half again beyond the 36-unit low-arc gun range
-;; (v^2/g), so the fleets must properly sail in before the guns speak
-(def PLAYER-POS [0.0 -3.0 -28.0])
-(def ENEMY-POS [0.0 -3.0 28.0])
+(def SHELL-LIFETIME 20.0)
+;; a shell past this has left the battle; the fleets spawn at 62 and the
+;; simulated sea runs to 93, so it has to be wider than either
+(def ARENA-LIMIT 120.0)
+;; well over three times gun range apart: the fleets have a proper approach
+;; to sail before anyone is in a position to shoot
+(def PLAYER-POS [0.0 -3.0 -62.0])
+(def ENEMY-POS [0.0 -3.0 62.0])
 
 ;; --- fleet -----------------------------------------------------------------
 
@@ -85,6 +101,12 @@
   [a b]
   (reduce + (map #(* % %) (map - a b))))
 
+(defn flat-range
+  "Horizontal distance between two world points - the range a gun lays for."
+  [a b]
+  (let [dx (- (b 0) (a 0)) dz (- (b 2) (a 2))]
+    (Math/sqrt (+ (* dx dx) (* dz dz)))))
+
 (defn- muzzle-point
   "World point of a gun cell's muzzle: the cell centre, a cell and a half up
   so shells clear the turret."
@@ -106,9 +128,10 @@
   (let [dx (- (p1 0) (p0 0)) dy (- (p1 1) (p0 1)) dz (- (p1 2) (p0 2))
         d (Math/sqrt (+ (* dx dx) (* dz dz)))
         s2 (* speed speed)
-        disc (- (* s2 s2) (* GRAVITY (+ (* GRAVITY d d) (* 2.0 dy s2))))]
+        disc (- (* s2 s2)
+                (* SHELL-GRAVITY (+ (* SHELL-GRAVITY d d) (* 2.0 dy s2))))]
     (when (and (> d 1e-6) (>= disc 0.0))
-      (let [tan (/ (- s2 (Math/sqrt disc)) (* GRAVITY d))
+      (let [tan (/ (- s2 (Math/sqrt disc)) (* SHELL-GRAVITY d))
             cos (/ 1.0 (Math/sqrt (+ 1.0 (* tan tan))))
             sin (* tan cos)]
         [(* speed cos (/ dx d)) (* speed sin) (* speed cos (/ dz d))]))))
@@ -146,7 +169,7 @@
         (when v
           (loop [t 0.0 pts []]
             (let [p [(+ (m 0) (* (v 0) t))
-                     (+ (m 1) (* (v 1) t) (* -0.5 GRAVITY t t))
+                     (+ (m 1) (* (v 1) t) (* -0.5 SHELL-GRAVITY t t))
                      (+ (m 2) (* (v 2) t))]]
               (if (or (<= (p 1) 0.0) (> t 8.0))
                 (conj pts p)
@@ -195,7 +218,7 @@
         [sh []]
         (let [sh (-> sh
                      (update :pos (fn [p] (mapv + p (map #(* % h) (:vel sh)))))
-                     (update-in [:vel 1] - (* GRAVITY h))
+                     (update-in [:vel 1] - (* SHELL-GRAVITY h))
                      (update :t + h))
               p (:pos sh)
               struck (first (keep (fn [[id s]]
@@ -208,7 +231,8 @@
             struck [nil [{:kind :hit :ship struck :point p}]]
             (< (p 1) 0.0) [nil [{:kind :splash :point p}]]
             (or (> (:t sh) SHELL-LIFETIME)
-                (> (Math/abs (p 0)) 80.0) (> (Math/abs (p 2)) 80.0))
+                (> (Math/abs (p 0)) ARENA-LIMIT)
+                (> (Math/abs (p 2)) ARENA-LIMIT))
             [nil []]
             :else (recur (inc i) sh)))))))
 
@@ -229,43 +253,171 @@
 
 ;; --- the enemy gunner --------------------------------------------------------------
 
-(def ENGAGE-RANGE 30.0)  ; the AI sails in until the guns can reach
+;; Where she wants the fight. Time of flight is the only thing that lets a
+;; 26-unit hull be somewhere else when the shell lands, and it grows with
+;; range: measured, a hard turn takes her 4.4 units off her track in a
+;; shell's flight at range 34 and only 1.3 at range 24. So the edge of her
+;; own reach is the safe place to fight and the middle of it is not - which
+;; is why she works to hold a standoff instead of closing to point blank.
+(def STANDOFF (* 0.85 GUN-RANGE))
+;; Inside this she breaks off. Two things bite, and the hulls bite first: a
+;; shell starts arriving faster than she can be elsewhere, and - since these
+;; are 26-unit ships - a range measured centre to centre that is barely more
+;; than a ship's length is already an overlap when they are bow on. Ramming
+;; put a hull under with its armour untouched.
+(def KNIFE-RANGE (max (* 0.55 GUN-RANGE) (* 1.25 ship/LENGTH)))
+;; a gun that comes up within a shell's flight is a gun to worry about now
+(def ^:private THREAT-HORIZON 2.4)
+;; How hard she leans on and off the bearing to correct the range. She turns
+;; at about 19 deg/s, so swinging from a head-on approach onto her orbit
+;; takes some four seconds, in which the two of them close another thirty
+;; units - the flare has to start that far outside the standoff or she blows
+;; straight through it into a brawl. A tenth of a unit per unit of error did
+;; exactly that.
+(def ^:private RANGE-GAIN 0.06)
+;; ...and how hard she leans against the rate she is closing at. Range error
+;; alone is proportional control through a four-second lag, which oscillates:
+;; she overshot the standoff, ran out past it, came back in, and wandered
+;; between 20 and 65 units for the whole battle.
+(def ^:private RANGE-DAMP 0.15)
+(def ^:private RANGE-LEAN-MAX 2.5)
+(def ^:private HELM-DEADBAND 0.10)
+;; How far either side of her base course she snakes while a gun is on her.
+;; Reversing which way round the foe she goes would be a bigger dodge, but a
+;; 180-degree turn takes nine seconds at her rate of turn and his gun cycles
+;; in three, so she would never finish one - the helm stays saturated, she
+;; never actually orbits, and the range runs away. Weaving either side of the
+;; course keeps her turning without giving up station-keeping.
+(def ^:private WEAVE-ANGLE 0.6)
 
 (defn- bow-dir
   "Unit bow direction of a ship in world space (bow at +k in layout)."
   [s]
   (buoy/q-rotate (:quat s) [0.0 0.0 1.0]))
 
-(defn ai-helm
-  "Helm order for an AI ship while the fleets close: full thrust and a
-  hard turn toward the nearest live foe until inside ENGAGE-RANGE, then
-  hold station and let the guns work. [thrust turn], right-positive."
+(defn gun-threat
+  "How long until the foe could put a shell in the air at s: their remaining
+  reload, or nil when their guns cannot reach her at all. This is the thing
+  the AI steers by - not the foe's position, but the state of his guns."
+  [s foe]
+  (when (and foe
+             (not (:sunk foe))
+             (<= (flat-range (:pos s) (:pos foe)) GUN-RANGE))
+    (max 0.0 (double (or (:cooldown foe) 0.0)))))
+
+(defn- live-foe
+  [state id]
+  (first (remove #(or (:sunk %) (= id (:id %))) (vals (:ships state)))))
+
+(defn- weave-side
+  "Which way she is snaking right now: flipped halfway through the foe's
+  reload, so the cross-range speed he led on when he fired is not the one she
+  is carrying when the shell arrives. Nil threat means nobody is shooting at
+  her and she can steady up."
+  [threat]
+  (cond (nil? threat) 0.0
+        (> threat (* 0.5 FIRE-COOLDOWN)) 1.0
+        :else -1.0))
+
+(defn ai-course
+  "The course an AI ship wants to be steering, as a unit [x z].
+
+  Underneath is a circle of STANDOFF radius about the foe: the tangent,
+  leaned on or off the bearing by however far the range is out, going round
+  whichever way she is already going. On top of that she snakes either side
+  of it while a gun is on her, because a shell is aimed where she would be if
+  she kept doing what she is doing - so she makes sure she is not."
   [state id]
   (let [s (get-in state [:ships id])
-        foe (first (remove #(or (:sunk %) (= id (:id %))) (vals (:ships state))))]
+        foe (live-foe state id)]
+    (if (nil? foe)
+      (let [[bx _ bz] (bow-dir s)] [bx bz])
+      (let [[sx _ sz] (:pos s)
+            [fx _ fz] (:pos foe)
+            [bx _ bz] (bow-dir s)
+            d (max 1e-6 (flat-range (:pos s) (:pos foe)))
+            lx (/ (- fx sx) d) lz (/ (- fz sz) d)
+            ;; keep circling the way she already is, so she commits to one
+            ;; hand rather than dithering across the bearing
+            sense (if (>= (+ (* bx (- lz)) (* bz lx)) 0.0) 1.0 -1.0)
+            [vx _ vz] (or (:vel s) [0.0 0.0 0.0])
+            closing (+ (* vx lx) (* vz lz))
+            lean (max (- RANGE-LEAN-MAX)
+                      (min RANGE-LEAN-MAX
+                           (- (* RANGE-GAIN (- d STANDOFF))
+                              (* RANGE-DAMP closing))))
+            wx (+ (* sense (- lz)) (* lean lx))
+            wz (+ (* sense lx) (* lean lz))
+            m (Math/sqrt (+ (* wx wx) (* wz wz)))
+            ;; The snake costs range: a course swung 35 degrees off the
+            ;; tangent is half-radial. So it gives way to station-keeping in
+            ;; proportion to how far out of position she is - full weave on
+            ;; station, barely any of it on the run in.
+            a (* WEAVE-ANGLE (weave-side (gun-threat s foe))
+                 (/ 1.0 (+ 1.0 (Math/abs lean))))
+            c (Math/cos a) sn (Math/sin a)
+            ux (/ wx m) uz (/ wz m)]
+        [(- (* ux c) (* uz sn))
+         (+ (* ux sn) (* uz c))]))))
+
+(defn ai-helm
+  "Helm order for an AI ship: [thrust turn], right-positive.
+
+  She is under way whenever she is afloat and has a foe - a ship holding
+  station is a ship with a solved firing problem. The helm steers her onto
+  ai-course, and while a loaded gun is pointed at her, or she is close
+  enough that she cannot dodge at all, it stays hard over rather than
+  settling on the wanted heading."
+  [state id]
+  (let [s (get-in state [:ships id])
+        foe (live-foe state id)]
     (if (or (nil? foe) (:sunk s) (not (:ai s)))
       [0.0 0.0]
-      (let [[fx _ fz] (:pos foe)
-            [sx _ sz] (:pos s)
-            d (Math/sqrt (+ (* (- fx sx) (- fx sx)) (* (- fz sz) (- fz sz))))]
-        (if (> d ENGAGE-RANGE)
-          (let [[bx _ bz] (bow-dir s)
-                cross-y (- (* bz (- fx sx)) (* bx (- fz sz)))]
-            (if (< (Math/abs cross-y) 0.5)
-              [1.0 0.0]
-              [1.0 (Math/signum cross-y)]))
-          [0.0 0.0])))))
+      (let [[wx wz] (ai-course state id)
+            [bx _ bz] (bow-dir s)
+            off (- (* bz wx) (* bx wz))
+            t (gun-threat s foe)
+            pressed? (or (and t (< t THREAT-HORIZON))
+                         (< (flat-range (:pos s) (:pos foe)) KNIFE-RANGE))]
+        [1.0 (cond
+               (> off HELM-DEADBAND) 1.0
+               (< off (- HELM-DEADBAND)) -1.0
+               ;; already on the wanted heading but still under the gun:
+               ;; keep the helm working rather than steadying into the
+               ;; solution he has already computed
+               pressed? (let [w (weave-side t)] (if (zero? w) 1.0 w))
+               :else 0.0)]))))
 
-(defn- aim-point
-  "Where an AI gunner aims: the foe's position one estimated flight-time
-  from now, raised to hull height."
+(defn flight-time
+  "How long a low-arc shell is actually in the air over a flat range d:
+  d / (v cos theta), not d / v. The difference is a fifth of the flight at
+  fighting range, which is several hull-widths of lead."
+  [d]
+  (let [s2 (* SHELL-SPEED SHELL-SPEED)
+        disc (- (* s2 s2) (* SHELL-GRAVITY SHELL-GRAVITY d d))]
+    (if (or (< d 1e-6) (neg? disc))
+      (/ (max d 1e-6) SHELL-SPEED)
+      (let [tan (/ (- s2 (Math/sqrt disc)) (* SHELL-GRAVITY d))
+            cos (/ 1.0 (Math/sqrt (+ 1.0 (* tan tan))))]
+        (/ d (* SHELL-SPEED cos))))))
+
+(defn aim-point
+  "Where an AI gunner aims: where the foe will be when the shell arrives,
+  raised to hull height. Solved by iteration, because the lead moves the
+  target, which moves the range, which moves the time of flight."
   [shooter foe]
-  (let [[tx ty tz] (:pos foe)
+  (let [[sx _ sz] (:pos shooter)
+        [tx ty tz] (:pos foe)
         [vx _ vz] (or (:vel foe) [0.0 0.0 0.0])
-        [sx _ sz] (:pos shooter)
-        d (Math/sqrt (+ (* (- tx sx) (- tx sx)) (* (- tz sz) (- tz sz))))
-        t (/ d SHELL-SPEED)]
-    [(+ tx (* vx t)) (+ ty 1.0) (+ tz (* vz t))]))
+        reach (fn [t]
+                (let [px (+ tx (* vx t)) pz (+ tz (* vz t))]
+                  [px pz (flat-range [px 0.0 pz] [sx 0.0 sz])]))]
+    (loop [t (/ (flat-range [tx 0.0 tz] [sx 0.0 sz]) SHELL-SPEED) n 0]
+      (let [[px pz d] (reach t)
+            t' (flight-time d)]
+        (if (or (= n 4) (< (Math/abs (- t' t)) 1e-4))
+          [px (+ ty 1.0) pz]
+          (recur t' (inc n)))))))
 
 (defn- ai-engage
   [st id]

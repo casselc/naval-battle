@@ -6,6 +6,7 @@
             [voxel.physics :as phys]
             [voxel.ship :as ship]
             [voxel.world :as w]
+            [voxel.box3d :as b3]
             [voxel.buoyancy :as buoy]
             [voxel.ocean :as ocean]
             [voxel.seac :as seac]))
@@ -238,3 +239,96 @@
                  1e-12)
               (str "sample " x " " z))))
       (seac/sim-free!))))
+
+
+;; --- can she be missed? -----------------------------------------------------
+;;
+;; A shell is aimed where the target would be if she kept doing what she is
+;; doing. Whether evasion means anything is therefore one number: how far off
+;; that straight-line prediction can she get before the shell arrives, against
+;; her own beam. These pin it, because it is easy to lose by accident - a
+;; heavier damping constant or a slower shell and manoeuvring stops mattering.
+
+(defn- warship []
+  (let [l (ship/dreadnought)]
+    (phys/spawn-body! [0.0 -3.0 0.0] (buoy/yaw-quat 0.0) 1
+                      (:anchor l) (keys (:cells l)))))
+
+(defn- track-off
+  "How far the hull ends up from where a gunner would have predicted, having
+  steered `turn` for one shell's time of flight at `rng`."
+  [rng turn]
+  (phys/init!)
+  (let [id (warship)
+        _ (settle 3.0 0.02)
+        _ (sail id 6.0 0.02 1.0 0.0)
+        f0 (body-fact (phys/step! 0.02) id)
+        [px _ pz] (:pos f0)
+        [vx _ vz] (:vel f0)
+        t (w/flight-time rng)
+        [ax _ az] (:pos (body-fact (sail id t 0.02 1.0 turn) id))]
+    [(Math/sqrt (+ (* (- ax (+ px (* vx t))) (- ax (+ px (* vx t))))
+                   (* (- az (+ pz (* vz t))) (- az (+ pz (* vz t))))))
+     (:speed f0)]))
+
+(deftest a-ship-can-steer-out-of-a-firing-solution
+  (testing "at her standoff range a hard turn takes her clear of her own beam"
+    (let [[off spd] (track-off w/STANDOFF 1.0)]
+      (is (> spd 6.0) (str "she has way on: " spd))
+      (is (> off 3.5)
+          (str "hard helm leaves the predicted point by " off
+               " - her half-beam is 3.5, so the shell misses"))))
+  (testing "holding course lands her where the gunner said she would be"
+    (let [[off _] (track-off w/STANDOFF 0.0)]
+      (is (< off 1.0)
+          (str "steady course deviates only " off " - the lead is good"))))
+  (testing "and closing the range takes that away, which is why the AI does
+            not want a knife fight"
+    (let [[far _] (track-off w/STANDOFF 1.0)
+          [near _] (track-off w/KNIFE-RANGE 1.0)]
+      (is (< near far)
+          (str "at knife range the same helm only buys " near
+               " against " far " at standoff")))))
+
+(deftest engines-drive-a-hull-straight
+  (testing "full ahead with the helm amidships holds her heading"
+    ;; propulsion is applied through the centre of mass; through the grid
+    ;; anchor instead - half a cell off the centreline and two below the
+    ;; mass - it put a permanent couple on her and she steamed in a circle
+    (phys/init!)
+    (let [id (warship)]
+      (settle 3.0 0.02)
+      (let [y0 (yaw-of (body-fact (phys/step! 0.02) id))
+            y1 (yaw-of (body-fact (sail id 6.0 0.02 1.0 0.0) id))]
+        (is (< (Math/abs (- y1 y0)) 0.05)
+            (str "yawed " (Math/toDegrees (- y1 y0)) " deg under power alone")))))
+  (testing "and the helm still bites"
+    (phys/init!)
+    (let [id (warship)]
+      (settle 3.0 0.02)
+      (sail id 3.0 0.02 1.0 0.0)
+      (let [y0 (yaw-of (body-fact (phys/step! 0.02) id))
+            y1 (yaw-of (body-fact (sail id 3.0 0.02 1.0 1.0) id))
+            rate (Math/toDegrees (/ (- y1 y0) 3.0))]
+        (is (< 12.0 rate 40.0)
+            (str "turn rate " rate " deg/s - fast enough to dodge, slow "
+                 "enough to still be a warship"))))))
+
+(deftest a-hull-resists-moving-sideways
+  (testing "she slides far less across the beam than she runs along the keel"
+    ;; without this the body slides sideways as freely as forward, so putting
+    ;; the helm over swings the bow while momentum carries her along the old
+    ;; track, and turning stops being evasion
+    (phys/init!)
+    (let [id (warship)
+          _ (settle 3.0 0.02)
+          _ (phys/step! 0.02)]
+      ;; kick her squarely sideways and see how much of it survives
+      (b3/set-velocity! id 6.0 0.0 0.0)
+      (let [[sx _ _] (:vel (body-fact (settle 1.0 0.02) id))]
+        (b3/set-velocity! id 0.0 0.0 6.0)
+        (let [[_ _ sz] (:vel (body-fact (settle 1.0 0.02) id))]
+          (is (pos? sz) "she keeps way along the keel")
+          (is (< (Math/abs sx) (* 0.4 sz))
+              (str "a second after a 6 u/s kick she has " sx " left across "
+                   "the beam against " sz " along the keel")))))))

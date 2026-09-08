@@ -24,6 +24,14 @@ prototype rendered with raylib and simulated with Box3D.
   from scripts.
 - **Combat** — ballistic shells with an analytic firing solution preview arc,
   voxel-level hull carving on impact, flooding of carved cells, and debris.
+  Shells have their own gravity, separate from the world's, so gun range and
+  time of flight are independent: a round takes about two and a half seconds
+  to cross the fighting range, which is long enough for a ship to be
+  somewhere else when it lands.
+- **Manoeuvring** — hulls resist moving sideways far harder than ahead, and
+  propulsion acts through the centre of mass, so putting the helm over
+  changes where a ship ends up rather than just which way she points. That is
+  what makes evasion mean anything.
 
 ## Requirements
 
@@ -50,7 +58,12 @@ run.
 - Click to fire
 - `R` restarts after a battle ends
 
-The enemy ship closes to gun range and returns fire on its own.
+The enemy works to hold a standoff near the edge of her reach rather than
+closing: time of flight grows with range, and it is time of flight that lets
+her be somewhere else when a shell arrives. She watches your guns rather than
+your ship - reversing her helm across your reload, so the lead you fired on
+is not the course she is carrying when the round gets there - and breaks off
+if the range falls to where the hulls could touch.
 
 ## Code layout
 

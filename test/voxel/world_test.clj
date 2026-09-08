@@ -5,7 +5,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [voxel.world :as w]
             [voxel.ocean :as sea]
-            [voxel.buoyancy :as buoy]))
+            [voxel.buoyancy :as buoy]
+            [voxel.ship :as ship]))
 
 (defn- dist
   [a b]
@@ -164,11 +165,34 @@
 (deftest fleets-spawn-clear-beyond-gun-range
   (let [p (get-in (w/initial-state) [:ships :player :pos])
         e (get-in (w/initial-state) [:ships :enemy :pos])
-        d (Math/sqrt (reduce + (map #(* % %) (map - p e))))
-        gun-range (/ (* w/SHELL-SPEED w/SHELL-SPEED) w/GRAVITY)]
-    (is (>= d (* 1.5 gun-range))
-        (str "fleets start half again beyond the " gun-range
-             "-unit gun range - a proper sail-in, not a knife fight"))))
+        d (Math/sqrt (reduce + (map #(* % %) (map - p e))))]
+    (is (>= d (* 2.5 w/GUN-RANGE))
+        (str "fleets start " d " apart against a " w/GUN-RANGE
+             "-unit gun range - a proper approach, not a knife fight"))
+    (is (< d (* 2.0 w/SEA-EXTENT))
+        "and both start on the simulated sea")))
+
+(deftest the-ai-keeps-clear-of-the-other-ship
+  (testing "she breaks off before the hulls can touch - these are 26-unit
+            ships, so a centre-to-centre range near that is already a
+            collision, and ramming puts a hull under undamaged"
+    (is (> w/KNIFE-RANGE ship/LENGTH)
+        (str "break-off range " w/KNIFE-RANGE " against a "
+             ship/LENGTH "-unit hull"))
+    (is (> w/STANDOFF w/KNIFE-RANGE)
+        "and she settles further out than that, not on the edge of it")))
+
+(deftest the-fighting-band-is-inside-gun-range-but-not-a-brawl
+  (is (< w/KNIFE-RANGE w/STANDOFF w/GUN-RANGE)
+      "she wants to fight where she can shoot and still be missed")
+  (is (> (w/flight-time w/STANDOFF) 2.0)
+      (str "a shell takes " (w/flight-time w/STANDOFF)
+           "s to reach her standoff - long enough to be somewhere else"))
+  (testing "time of flight is what buys the dodge, and it grows with range -
+            that is the whole reason she fights out here rather than closing"
+    (is (> (w/flight-time w/STANDOFF) (w/flight-time (* 0.5 w/STANDOFF))))
+    (is (< (w/flight-time (* 0.4 w/GUN-RANGE)) 1.6)
+        "well inside, a shell arrives before a hull can move its own beam")))
 
 (deftest the-sea-runs-past-the-frame
   (let [oc (:ocean (w/initial-state))
@@ -184,13 +208,121 @@
     (is (< (Math/abs (- w/SEA-SPACING w/SEA-TARGET-SPACING)) 0.2)
         "tiles come out near the target spacing")))
 
-(deftest enemy-closes-when-out-of-range
-  (let [far (assoc-in (w/initial-state) [:ships :player :pos] [0.0 -3.0 -30.0])
-        near (assoc-in (w/initial-state) [:ships :player :pos] [0.0 -3.0 4.0])]
-    (is (= [1.0 0.0] (w/ai-helm far :enemy))
-        "bow-on and out of range: full thrust, no turn")
-    (is (= [0.0 0.0] (w/ai-helm near :enemy))
-        "inside engage range the AI holds station and lets the guns work")
-    (let [flank (assoc-in far [:ships :player :pos] [24.0 -3.0 58.0])]
-      (is (= [1.0 -1.0] (w/ai-helm flank :enemy))
-          "foe on the port beam: hard turn to port under full thrust"))))
+(defn- duel
+  "A two-ship state with the AI enemy at the origin and the player placed at
+  a given bearing and range, both making way."
+  [range bearing & {:keys [foe-cooldown enemy-yaw player-vel]
+                    :or {foe-cooldown 0.0 enemy-yaw 0.0}}]
+  (-> (w/initial-state)
+      (assoc-in [:ships :enemy :pos] [0.0 -3.0 0.0])
+      (assoc-in [:ships :enemy :quat] (buoy/yaw-quat enemy-yaw))
+      (assoc-in [:ships :player :pos] [(* range (Math/sin bearing)) -3.0
+                                       (* range (Math/cos bearing))])
+      (assoc-in [:ships :player :cooldown] foe-cooldown)
+      (assoc-in [:ships :player :vel] (or player-vel [0.0 0.0 0.0]))))
+
+(defn- helm-range-trend
+  "Does this helm order open or close the range? Positive means opening."
+  [st id]
+  (let [[thrust _] (w/ai-helm st id)
+        s (get-in st [:ships id])
+        foe (first (remove #(= id (:id %)) (vals (:ships st))))
+        want (w/ai-course st id)
+        [dx _ dz] (mapv - (:pos foe) (:pos s))
+        d (Math/sqrt (+ (* dx dx) (* dz dz)))]
+    ;; component of the wanted course along the bearing to the foe
+    (- (* thrust (+ (* (want 0) (/ dx d)) (* (want 1) (/ dz d)))))))
+
+(deftest the-ai-closes-when-it-cannot-reach
+  (testing "well outside gun range she comes on, under full power"
+    (let [st (duel 90.0 0.0)]
+      (is (= 1.0 (first (w/ai-helm st :enemy))) "full ahead")
+      (is (neg? (helm-range-trend st :enemy)) "closing the range")))
+  (testing "but not straight down the throat - she comes on at a slant, so
+            she is already turning when she arrives"
+    (let [st (duel 90.0 0.0)
+          want (w/ai-course st :enemy)
+          ;; bearing to the foe is +z; a pure charge would be [0 1]
+          off (Math/abs (Math/atan2 (want 0) (want 1)))]
+      (is (> off 0.15) (str "approach slant " off " rad")))))
+
+(deftest the-ai-opens-the-range-when-it-is-too-close-to-dodge
+  (testing "inside the range where a shell arrives before she can be
+            elsewhere, she gets out rather than trading point blank"
+    (let [st (duel (* 0.5 w/GUN-RANGE) 0.0)]
+      (is (pos? (helm-range-trend st :enemy)) "opening the range")))
+  (testing "and holds station once she is back in her fighting band"
+    ;; at any instant she is 40 degrees off the tangent, because she is
+    ;; weaving; it is the mean across the weave that keeps the range
+    (let [mean (/ (+ (helm-range-trend (duel w/STANDOFF 0.0 :foe-cooldown 0.0)
+                                       :enemy)
+                     (helm-range-trend (duel w/STANDOFF 0.0
+                                             :foe-cooldown (* 0.9 w/FIRE-COOLDOWN))
+                                       :enemy))
+                  2.0)]
+      (is (< (Math/abs mean) 0.2)
+          (str "neither closing nor running on average, got " mean))))
+  (testing "the weave is a snake either side of her course, not a reversal -
+            she cannot turn 180 degrees inside his reload, and trying leaves
+            the helm saturated and the range running away"
+    (let [a (w/ai-course (duel w/STANDOFF 0.0 :foe-cooldown 0.0) :enemy)
+          b (w/ai-course (duel w/STANDOFF 0.0
+                               :foe-cooldown (* 0.9 w/FIRE-COOLDOWN)) :enemy)
+          dot (+ (* (a 0) (b 0)) (* (a 1) (b 1)))]
+      (is (pos? dot)
+          (str "the two weave legs still share a general direction, dot " dot)))))
+
+(deftest the-ai-watches-the-other-ship-s-guns
+  (testing "she reverses her helm across the foe's reload, so the cross-range
+            speed he led on is not the one she is carrying when it lands"
+    (let [loaded (duel w/STANDOFF 0.0 :foe-cooldown 0.0)
+          fresh (duel w/STANDOFF 0.0 :foe-cooldown (* 0.9 w/FIRE-COOLDOWN))]
+      (is (not= (w/ai-course loaded :enemy) (w/ai-course fresh :enemy))
+          "a loaded enemy gun and a just-fired one are different problems")))
+  (testing "a foe who cannot reach her is no threat at all"
+    (is (nil? (w/gun-threat (get-in (duel 90.0 0.0) [:ships :enemy])
+                            (get-in (duel 90.0 0.0) [:ships :player]))))
+    (is (some? (w/gun-threat (get-in (duel 30.0 0.0) [:ships :enemy])
+                             (get-in (duel 30.0 0.0) [:ships :player])))))
+  (testing "a sunk foe has no guns"
+    (let [st (assoc-in (duel 30.0 0.0) [:ships :player :sunk] true)]
+      (is (nil? (w/gun-threat (get-in st [:ships :enemy])
+                              (get-in st [:ships :player])))))))
+
+(deftest the-ai-keeps-the-helm-working-under-threat
+  (testing "with the foe's gun up she is always turning - a ship on a steady
+            course is a ship the lead is already correct for"
+    (doseq [bearing [0.0 1.1 2.2 3.3 4.4 5.5]]
+      (let [st (duel w/STANDOFF bearing :foe-cooldown 0.0)
+            [_ turn] (w/ai-helm st :enemy)]
+        (is (not (zero? turn)) (str "bearing " bearing " helm amidships"))))))
+
+(deftest a-dead-or-missing-foe-stops-the-ai
+  (is (= [0.0 0.0] (w/ai-helm (assoc-in (duel 30.0 0.0) [:ships :player :sunk] true)
+                              :enemy)))
+  (is (= [0.0 0.0] (w/ai-helm (duel 30.0 0.0) :player)) "the player is not driven"))
+
+;; --- gunnery: leading a moving target ---------------------------------------
+
+(deftest the-gunner-leads-by-the-real-time-of-flight
+  (testing "flight time is d/(v cos theta), not d/v"
+    (doseq [d [12.0 24.0 33.0]]
+      (is (> (w/flight-time d) (/ d w/SHELL-SPEED))
+          (str "range " d ": a lofted shell is in the air longer than a flat one"))))
+  (testing "the lead actually intercepts a target holding course"
+    ;; fire at the aim point, fly the shell analytically, and see whether the
+    ;; target has arrived at the same place
+    (let [shooter {:pos [0.0 0.0 0.0]}
+          target {:pos [0.0 0.0 30.0] :vel [7.0 0.0 0.0]}
+          [ax _ az] (w/aim-point shooter target)
+          d (Math/sqrt (+ (* ax ax) (* az az)))
+          t (w/flight-time d)
+          [px pz] [(+ (* 7.0 t)) 30.0]]
+      (is (< (Math/abs (- ax px)) 0.6)
+          (str "aim " ax " vs where she will be " px))
+      (is (< (Math/abs (- az pz)) 0.6))))
+  (testing "a stationary target needs no lead"
+    (let [[ax _ az] (w/aim-point {:pos [0.0 0.0 0.0]}
+                                 {:pos [5.0 0.0 20.0] :vel [0.0 0.0 0.0]})]
+      (is (< (Math/abs (- ax 5.0)) 1e-9))
+      (is (< (Math/abs (- az 20.0)) 1e-9)))))

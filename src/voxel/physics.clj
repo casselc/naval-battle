@@ -25,6 +25,34 @@
 (def ^:private BALL-FRICTION 0.4)
 (def ^:private BALL-RESTITUTION 0.3)
 (def ^:private SUBSTEPS 8)
+
+;; A hull is not rubble. The world's default damping is tuned to bleed
+;; micro-rotation out of debris so it reaches sleep; left on a ship it
+;; swallows the helm. Yaw damping now comes from the water instead (see
+;; drive-hydrodynamics! below), so the body's own angular damping only has to
+;; catch what that misses. Linear damping stays put - that is the resistance
+;; along the keel that caps her speed.
+(def HULL-LINEAR-DAMPING 0.6)
+(def HULL-ANGULAR-DAMPING 0.05)
+
+;; A hull resists moving sideways far harder than it resists moving ahead:
+;; that is what a keel is for, and it is the whole reason a turn changes
+;; where a ship ENDS UP rather than just which way she points. Without it the
+;; body slides sideways as easily as forward, so putting the helm over swung
+;; the bow while momentum carried her along the old track - a ship at full
+;; helm left her straight-line course by well under a metre in a shell's
+;; flight, and could not be missed.
+;;
+;; Applied at a bow and a stern station against the LOCAL water speed there,
+;; which includes the rotational part, so the same drag that stops sideslip
+;; also damps yaw and weathervanes her onto her course.
+;;
+;; Both the strength and the stations scale with the hull. A fixed coefficient
+;; would give a raft a dreadnought's grip on the water, and stations at a
+;; fixed arm would put a small body's drag outside its own length, which
+;; pins it rigid - a test raft stopped heeling on a sloped sea entirely.
+(def LATERAL-DRAG 1.28)          ; force per unit of sideways speed, per cell
+(def ^:private DRAG-ARM 0.7)     ; station, as a fraction of the half-length
 (def ^:private EXPLOSION-FALLOFF 1.0)
 
 (def ^:private world* (volatile! nil))
@@ -97,16 +125,18 @@
        ;; touching bodies stops coplanar face-grind without a visible gap
        (b3/add-box! id (- (+ i 0.5) ax) (- (+ j 0.5) ay) (- (+ k 0.5) az)
                     0.49 0.49 0.49 CELL-DENSITY CELL-FRICTION CELL-RESTITUTION))
+     (b3/set-damping! id HULL-LINEAR-DAMPING HULL-ANGULAR-DAMPING)
      (when vel
        (b3/set-velocity! id (vel 0) (vel 1) (vel 2)))
      (let [live (zipmap cells (repeat :cell))
-           {:keys [tris faces span]} (buoy/surface-cache live anchor)]
+           {:keys [tris faces span com]} (buoy/surface-cache live anchor)]
        (vswap! bodies* assoc id {:cells live
                                  :anchor anchor
                                  :skin (buoy/skin-faces live)
                                  :tris tris
                                  :faces faces
                                  :span span
+                                 :com com
                                  :flood 0.0}))
      id)))
 
@@ -120,32 +150,38 @@
     (vswap! bodies* update-in [id]
             (fn [live]
               (let [live' (reduce dissoc (:cells live) cells)
-                    {:keys [tris faces span]}
+                    {:keys [tris faces span com]}
                     (buoy/surface-cache live' (:anchor live))]
                 (-> live
                     (assoc :cells live')
                     (assoc :tris tris)
                     (assoc :faces faces)
-                    (assoc :span span)))))))
+                    (assoc :span span)
+                    ;; damage moves the balance point, and driving her from
+                    ;; the old one is what makes a shot-up hull wander
+                    (assoc :com com)))))))
 
-(def ^:private ENGINE-FORCE 6000.0)  ; ~8 u/s flat out against 0.6 damping
-(def ^:private RUDDER-FORCE 1500.0)  ; bow/stern couple, ~25 deg/s of yaw
+(def ENGINE-FORCE 6000.0)   ; ~8 u/s flat out against the linear damping
+(def RUDDER-FORCE 3400.0)   ; bow/stern couple, ~25 deg/s of yaw
 (def ^:private RUDDER-ARM 11.0)      ; half the keel, about the anchor
 
 (defn steer!
   "Helm command for one step: thrust -1..1 drives the hull along its bow
-  axis (local +k, the bow), turn -1..1 yaws it via a rudder force couple at
-  bow and stern (right helm swings the bow to starboard, +x at identity
-  yaw). The default Box3D hull damping is the water resistance that caps
-  both speed and turn rate."
+  axis (local +k, the bow) through her centre of mass, turn -1..1 yaws her
+  via a rudder force couple at bow and stern (right helm swings the bow to
+  starboard, +x at identity yaw)."
   [id thrust turn]
-  (when (get @bodies* id)
+  (when-let [rec (get @bodies* id)]
     (let [[pos quat] (b3/transform id)
           [px py pz] pos
+          com (buoy/q-rotate quat (or (:com rec) [0.0 0.0 0.0]))
           fwd (buoy/q-rotate quat [0.0 0.0 1.0])
           push (fn [f p]
                  (b3/apply-force! id (f 0) (f 1) (f 2)
-                                  (+ px (p 0)) (+ py (p 1)) (+ pz (p 2)) true))]
+                                  (+ px (com 0) (p 0))
+                                  (+ py (com 1) (p 1))
+                                  (+ pz (com 2) (p 2))
+                                  true))]
       (when (not (zero? thrust))
         (push (mapv #(* thrust ENGINE-FORCE %) fwd) [0.0 0.0 0.0]))
       (when (not (zero? turn))
@@ -218,6 +254,36 @@
                  [x (water x z) z]))
              WATER-SAMPLES)))))
 
+(defn- drive-hydrodynamics!
+  "The water's grip on one hull for this step: drag across the beam at a bow
+  and a stern station. Nothing along the keel - the body's linear damping is
+  already that."
+  [id rec]
+  (let [[pos quat] (b3/transform id)
+        [cx cy cz] (buoy/q-rotate quat (or (:com rec) [0.0 0.0 0.0]))
+        [px py pz] (mapv + pos [cx cy cz])
+        [vx _ vz] (b3/velocity id)
+        [_ wy _] (b3/angular-velocity id)
+        side (buoy/q-rotate quat [1.0 0.0 0.0])
+        fwd (buoy/q-rotate quat [0.0 0.0 1.0])
+        drag (* LATERAL-DRAG (count (:cells rec)))
+        station (* DRAG-ARM (nth (or (:span rec) [1.0 1.0 1.0]) 2))]
+    (doseq [arm [station (- station)]]
+      (let [rx (* arm (fwd 0))
+            rz (* arm (fwd 2))
+            ;; water speed at the station: hull velocity plus the rotation
+            ;; about the vertical, u = v + w x r. With w = (0, wy, 0) that
+            ;; cross product is (wy rz, 0, -wy rx) - get the sign backwards
+            ;; and the drag drives the spin instead of damping it.
+            ux (+ vx (* wy rz))
+            uz (- vz (* wy rx))
+            slip (+ (* ux (side 0)) (* uz (side 2)))
+            f (- (* drag slip))]
+        (b3/apply-force! id
+                         (* f (side 0)) 0.0 (* f (side 2))
+                         (+ px rx) py (+ pz rz)
+                         false)))))
+
 (defn- drive-floatation!
   "One body's water interaction for this step: buoyant uplift and flood weight
   applied as forces (waking the body - a settled hull must still ride every
@@ -261,6 +327,7 @@
   ([dt] (step! dt nil))
   ([dt water]
   (doseq [[id rec] @bodies*]
+    (drive-hydrodynamics! id rec)
     (drive-floatation! id rec dt water))
   (b3/step! @world* dt SUBSTEPS)
   {:ball (when-let [id @ball*] (body-fact id))

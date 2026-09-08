@@ -341,16 +341,36 @@
                                0.0 ks))))
             [0 1 2]))))
 
+(defn hull-centre
+  "The hull's centre of mass in anchor-relative coordinates - every cell
+  weighs the same, so it is the mean cell centre.
+
+  The anchor is a grid landmark, not a balance point: on the dreadnought it
+  sits half a cell off the centreline and a couple of cells below the mass.
+  Driving her from there puts a permanent couple on the hull - she steams in
+  a circle with the helm amidships and noses down under power."
+  [cells anchor]
+  (let [ks (keys cells)
+        n (double (count ks))]
+    (if (zero? n)
+      [0.0 0.0 0.0]
+      (mapv (fn [axis]
+              (- (/ (reduce (fn [a c] (+ a (c axis) 0.5)) 0.0 ks) n)
+                 (anchor axis)))
+            [0 1 2]))))
+
 (defn surface-cache
   "Static per-hull data for the floatation hot path: the closed surface mesh
-  as anchor-relative triangles, the exposed faces, and the hull's footprint -
-  all recomputed only when damage changes the cells rather than every frame."
+  as anchor-relative triangles, the exposed faces, the hull's footprint and
+  its centre of mass - all recomputed only when damage changes the cells
+  rather than every frame."
   [cells anchor]
   {:tris (mapv (fn [[a b c]]
                  [(mapv - a anchor) (mapv - b anchor) (mapv - c anchor)])
                (mesh/surface-triangles cells))
    :faces (surface-faces cells)
-   :span (hull-span cells anchor)})
+   :span (hull-span cells anchor)
+   :com (hull-centre cells anchor)})
 
 (defn openings-below
   "Count of intake openings: exposed fracture faces (not original skin) whose

@@ -22,6 +22,7 @@
 (ffi/defcfn ball-create*    "vb3_ball_create"       [:uint32 :double :double :double :float :float :float :float :float :float :float] :uint64)
 (ffi/defcfn body-transform* "vb3_body_transform"    [:uint64 :pointer :pointer] :void)
 (ffi/defcfn body-velocity*  "vb3_body_velocity"     [:uint64 :pointer] :void)
+(ffi/defcfn body-angvel*    "vb3_body_angular_velocity" [:uint64 :pointer] :void)
 (ffi/defcfn body-awake*     "vb3_body_awake"        [:uint64] :int)
 (ffi/defcfn body-set-vel*   "vb3_body_set_velocity" [:uint64 :float :float :float] :void)
 (ffi/defcfn body-set-awake* "vb3_body_set_awake"    [:uint64 :int] :void)
@@ -90,6 +91,14 @@
   [[(ffi/read pos-buf :double 0) (ffi/read pos-buf :double 8) (ffi/read pos-buf :double 16)]
    [(ffi/read quat-buf :float 0) (ffi/read quat-buf :float 4)
     (ffi/read quat-buf :float 8) (ffi/read quat-buf :float 12)]])
+
+(defn angular-velocity
+  "Body angular velocity as [wx wy wz], radians per second."
+  [body]
+  (body-angvel* body vel-buf)
+  [(ffi/read vel-buf :float 0)
+   (ffi/read vel-buf :float 4)
+   (ffi/read vel-buf :float 8)])
 
 (defn velocity
   "Body linear velocity as [vx vy vz]."

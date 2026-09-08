@@ -132,6 +132,14 @@ void vb3_body_velocity( uint64_t body, float* vel_out )
 	vel_out[2] = v.z;
 }
 
+void vb3_body_angular_velocity( uint64_t body, float* vel_out )
+{
+	b3Vec3 w = b3Body_GetAngularVelocity( b3LoadBodyId( body ) );
+	vel_out[0] = w.x;
+	vel_out[1] = w.y;
+	vel_out[2] = w.z;
+}
+
 int vb3_body_awake( uint64_t body )
 {
 	return b3Body_IsAwake( b3LoadBodyId( body ) ) ? 1 : 0;
