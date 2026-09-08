@@ -1,7 +1,8 @@
 (ns voxel.input
   "Raylib input reads ONLY. Reports raw intents: mouse position, aim
   yaw/pitch, button edges, restart key. Owns no game state."
-  (:require [voxel.raylib :as rl]))
+  (:require [voxel.camera :as cam]
+            [voxel.raylib :as rl]))
 
 (def YAW-MAX 0.35)      ; radians either side of straight downrange
 (def PITCH-MIN 0.04)    ; near-flat shots
@@ -58,7 +59,12 @@
   flat sea (y = 0): where the player is aiming. Falls back to a far
   downrange point when the ray never dips below the horizon. The 8-arg
   arity serves the orthographic RTS camera (fovy = full vertical
-  world-units in view); the 7-arg arity stays perspective."
+  world-units in view); the 7-arg arity stays perspective.
+
+  The ray starts at height origin_y and descends at dir_y, so it reaches the
+  sea after -origin_y/dir_y. Negating that as well sends it BACKWARDS out of
+  the screen, and every shot lands in the same place - which is what it did,
+  hidden by a clamp that then pinned the result to one corner."
   ([mx my width height cam-pos cam-target fovy]
    (sea-point mx my width height cam-pos cam-target fovy false))
   ([mx my width height cam-pos cam-target fovy ortho?]
@@ -81,8 +87,13 @@
                           (mapv #(* ndc-y half-h %) u)))
                   cam-pos)
          dy (dir 1)
-         s (if (< dy -1e-4) (- (/ (- (origin 1)) dy)) 400.0)
+         s (if (< dy -1e-4) (/ (- (origin 1)) dy) 400.0)
          x (+ (origin 0) (* s (dir 0)))
          z (+ (origin 2) (* s (dir 2)))
-         clamp (fn [v] (max -70.0 (min 70.0 v)))]
-     [(clamp x) 0.0 (clamp z)])))
+         ;; The battle goes wherever the ships take it, so the aim is bounded
+         ;; relative to what this camera can see, not to a fixed box around
+         ;; the world origin - which stopped tracking the mouse the moment
+         ;; the fight drifted out of it.
+         lim (* 1.2 (cam/view-reach fovy a cam-pos cam-target))
+         clamp (fn [v c] (max (- c lim) (min (+ c lim) v)))]
+     [(clamp x (cam-target 0)) 0.0 (clamp z (cam-target 2))])))

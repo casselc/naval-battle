@@ -170,9 +170,12 @@
     (rl/rl-end)))
 
 (defn- draw-aim!
-  "A flat gold tile where the mouse ray meets the sea."
+  "A flat gold tile where the mouse ray meets the sea, riding on the water.
+  Pinned at a fixed height it spends half its time under a wave, which is no
+  use to someone trying to see where they are pointing."
   [[x _ z]]
-  (rl/cube! :pos [x 0.06 z] :size [1.6 0.08 1.6] :color rl/GOLD))
+  (rl/cube! :pos [x (+ 0.12 (seac/sim-height x z)) z]
+            :size [1.8 0.1 1.8] :color rl/GOLD))
 
 (defn- draw-debris!
   [debris]
