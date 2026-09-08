@@ -145,15 +145,23 @@
                                  (:released? in)
                                  (= :playing (:phase world))))
                world (if fire-now (w/fire world :player fire-target) world)
-               ;; the helm: arrow keys drive the player's hull (the smoke
-               ;; env overrides the keyboard so scripted runs can steer)
-               helm (or smoke-helm (:helm in))
-               player-body (get-in world [:ships :player :body])
-               _ (when (and player-body
-                            (= :game screen)
-                            (= :playing (:phase world))
-                            (not (get-in world [:ships :player :sunk])))
-                   (phys/steer! player-body (helm 0) (helm 1)))
+                ;; the helm: arrow keys drive the player's hull (the smoke
+                ;; env overrides the keyboard so scripted runs can steer)
+                helm (or smoke-helm (:helm in))
+                player-body (get-in world [:ships :player :body])
+                _ (when (and player-body
+                             (= :game screen)
+                             (= :playing (:phase world))
+                             (not (get-in world [:ships :player :sunk])))
+                    (phys/steer! player-body (helm 0) (helm 1)))
+                ;; the enemy fleet closes to gun range on its own
+                enemy-body (get-in world [:ships :enemy :body])
+                _ (when (and enemy-body
+                             (= :game screen)
+                             (= :playing (:phase world))
+                             (not (get-in world [:ships :enemy :sunk])))
+                    (let [[t r] (w/ai-helm world :enemy)]
+                      (phys/steer! enemy-body t r)))
                ;; physics: step Box3D, fold the facts into the battle
                tp0 (System/currentTimeMillis)
                facts (phys/step! dt)

@@ -4,6 +4,7 @@
   winner when one ship goes under."
   (:require [clojure.test :refer [deftest is testing]]
             [voxel.world :as w]
+            [voxel.ocean :as sea]
             [voxel.buoyancy :as buoy]))
 
 (defn- dist
@@ -12,9 +13,12 @@
 
 (defn- rigged
   "Initial state with both fleets attached to fabricated physics bodies, so
-  physics facts fold by body id."
+  physics facts fold by body id, posed at gun range so the duelling tests
+  can actually hit each other."
   []
   (-> (w/initial-state)
+      (assoc-in [:ships :player :pos] [0.0 -3.0 -14.0])
+      (assoc-in [:ships :enemy :pos] [0.0 -3.0 14.0])
       (assoc-in [:ships :player :body] 101)
       (assoc-in [:ships :enemy :body] 102)))
 
@@ -27,13 +31,15 @@
 
 (defn- cruise
   "Step the battle n frames of dt under static facts; returns every
-  intermediate state."
+  intermediate state. The ocean is becalmed (:ambient false) so these
+  gunnery tests pay the cheap still-sea path, not full ambient churn."
   [st n dt]
-  (loop [i 0 st st hist []]
-    (if (= i n)
-      hist
-      (let [st' (w/step-state st dt (facts-for st))]
-        (recur (inc i) st' (conj hist st'))))))
+  (let [st (assoc-in st [:ocean :ambient] false)]
+    (loop [i 0 st st hist []]
+      (if (= i n)
+        hist
+        (let [st' (w/step-state st dt (facts-for st))]
+          (recur (inc i) st' (conj hist st')))))))
 
 (deftest the-battle-starts-with-two-fleets
   (let [st (w/initial-state)]
@@ -154,3 +160,33 @@
         (is (some (fn [p] (and (< (Math/abs (- (:x p) px)) 1.5)
                                (< (Math/abs (- (:z p) pz)) 1.5))) ps)
             "water is under every hull from the first frame")))))
+
+(deftest fleets-spawn-clear-beyond-gun-range
+  (let [p (get-in (w/initial-state) [:ships :player :pos])
+        e (get-in (w/initial-state) [:ships :enemy :pos])
+        d (Math/sqrt (reduce + (map #(* % %) (map - p e))))
+        gun-range (/ (* w/SHELL-SPEED w/SHELL-SPEED) w/GRAVITY)]
+    (is (>= d (* 1.5 gun-range))
+        (str "fleets start half again beyond the " gun-range
+             "-unit gun range - a proper sail-in, not a knife fight"))))
+
+(deftest the-sea-is-a-bigger-ocean-now
+  (let [ps (get-in (w/initial-state) [:ocean :particles])
+        xs (map #(Math/abs (:x %)) ps)
+        zs (map #(Math/abs (:z %)) ps)]
+    (is (>= (count ps) 4000) "65x65 lattice across the widened arena")
+    (is (>= (apply max xs) (- w/SEA-EXTENT 0.1))
+        "the sheet reaches the full declared extent")
+    (is (every? #(<= % sea/BOUNDS) (concat xs zs))
+        "no particle starts outside the ocean domain")))
+
+(deftest enemy-closes-when-out-of-range
+  (let [far (assoc-in (w/initial-state) [:ships :player :pos] [0.0 -3.0 -30.0])
+        near (assoc-in (w/initial-state) [:ships :player :pos] [0.0 -3.0 4.0])]
+    (is (= [1.0 0.0] (w/ai-helm far :enemy))
+        "bow-on and out of range: full thrust, no turn")
+    (is (= [0.0 0.0] (w/ai-helm near :enemy))
+        "inside engage range the AI holds station and lets the guns work")
+    (let [flank (assoc-in far [:ships :player :pos] [24.0 -3.0 58.0])]
+      (is (= [1.0 -1.0] (w/ai-helm flank :enemy))
+          "foe on the port beam: hard turn to port under full thrust"))))

@@ -17,12 +17,17 @@
   [:pointer :pointer :pointer :pointer :int64 :double :double
    :pointer :pointer :int64] :void)
 
+(ffi/defcfn fmm* "vsea_fmm"
+  [:pointer :pointer :pointer :int64 :int64 :double :pointer :pointer] :void)
+
 (ffi/defcfn mesh-init* "vsea_mesh_init" [:int :int :double :double] :void)
 (ffi/defcfn mesh-update* "vsea_mesh_update"
   [:pointer :pointer :pointer :pointer :int64 :double
    :pointer :pointer :pointer :pointer :pointer] :void)
 (ffi/defcfn mesh-draw* "vsea_mesh_draw" [] :void)
 (ffi/defcfn mesh-free* "vsea_mesh_free" [] :void)
+(ffi/defcfn mesh-vertex-count* "vsea_mesh_vertex_count" [] :int64)
+(ffi/defcfn mesh-read* "vsea_mesh_read" [:pointer :pointer :pointer] :void)
 
 (def ^:private bufs
   "Field scratch [capacity xs zs om act vx vz], grown on demand."
@@ -104,6 +109,8 @@
 (ffi/defcfn ship-draw* "vsea_ship_draw"
   [:int64 :pointer :pointer :pointer :pointer :pointer] :void)
 (ffi/defcfn ship-free* "vsea_ship_free" [:int64] :void)
+(ffi/defcfn ship-vertex-count* "vsea_ship_vertex_count" [:int64] :int64)
+(ffi/defcfn ship-read* "vsea_ship_read" [:int64 :pointer :pointer :pointer] :void)
 
 (defn- dir-index [d]
   (case d
@@ -170,6 +177,41 @@
   [id]
   (ship-free* (long id)))
 
+;; --- headless inspection -----------------------------------------------------
+;;
+;; vsea_mesh_init / vsea_ship_init skip every GL call when no window is up,
+;; so the CPU-side vertex arrays are filled either way. These read them back,
+;; which is how the sheet and the hulls are unit-tested: exactly the bytes the
+;; GPU would have been handed, no window, no screenshot diffing.
+
+(defn- read-buffers
+  "[verts norms colors] from a filled CPU mesh: n vertices, positions and
+  normals as [x y z] doubles, colours as [r g b a] ints."
+  [n fill!]
+  (if (zero? n)
+    [[] [] []]
+    (let [vb (ffi/alloc (* 8 3 n))
+          nb (ffi/alloc (* 8 3 n))
+          cb (ffi/alloc (* 4 n))]
+      (fill! vb nb cb)
+      [(mapv (fn [i] (mapv #(ffi/read vb :double (* 8 (+ (* 3 i) %))) (range 3)))
+             (range n))
+       (mapv (fn [i] (mapv #(ffi/read nb :double (* 8 (+ (* 3 i) %))) (range 3)))
+             (range n))
+       (mapv (fn [i] (mapv #(ffi/read cb :uint8 (+ (* 4 i) %)) (range 4)))
+             (range n))])))
+
+(defn ship-buffers
+  "[verts norms colors] of hull id as the GPU would receive them."
+  [id]
+  (read-buffers (ship-vertex-count* (long id))
+                (fn [vb nb cb] (ship-read* (long id) vb nb cb))))
+
+(defn mesh-buffers
+  "[verts norms colors] of the sea sheet as the GPU would receive them."
+  []
+  (read-buffers (mesh-vertex-count*) mesh-read*))
+
 (defn field
   "Particles -> per-particle [fx 0.0 fz], the reference sparse field at C
   speed. r truncates the field (water beyond it rests), eps is the
@@ -188,8 +230,29 @@
           (ffi/write om :double (double (:omega p)) (* 8 i))))
       (dotimes [i (count act-idx)]
         (ffi/write act :int64 (long (act-idx i)) (* 8 i)))
-      (field* xs zs om act (long (count act-idx))
-              (double (* r r)) (double eps) vx vz (long n))
+       (field* xs zs om act (long (count act-idx))
+               (double (* r r)) (double eps) vx vz (long n))
+       (mapv (fn [i]
+               [(ffi/read vx :double (* 8 i))
+                0.0
+                (ffi/read vz :double (* 8 i))])
+             (range n)))))
+
+(defn fmm
+  "Particles -> per-particle [fx 0.0 fz] via the C multi-level quadtree
+  FMM: the same field as voxel.ocean/fmm-velocities (same tree, same
+  expansion conventions) at native speed, for fully-churned seas where
+  every particle is active."
+  [ps p bounds]
+  (let [n (count ps)]
+    (ensure-buffers! n)
+    (let [[_cap xs zs om _act vx vz] @bufs]
+      (dotimes [i n]
+        (let [pc (nth ps i)]
+          (ffi/write xs :double (double (:x pc)) (* 8 i))
+          (ffi/write zs :double (double (:z pc)) (* 8 i))
+          (ffi/write om :double (double (:omega pc)) (* 8 i))))
+      (fmm* xs zs om (long n) (long p) (double bounds) vx vz)
       (mapv (fn [i]
               [(ffi/read vx :double (* 8 i))
                0.0

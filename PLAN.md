@@ -1,4 +1,4 @@
-let's frame this as overhead isometric view and generte tiles using wave function collapse algorithm
+let's frame this as overhead isometric view
 
 We'll be making a naval combat game, where the ocean is a particle simulation, and the ships are made of voxels. The first prototype will be of just the player
 against another ship shooting at one another until one sinks
@@ -10,6 +10,8 @@ While that surface volume trick handles the structural buoyancy the Fast Multipo
 ## future ideas
 
 The interaction between those two systems would create a ridiculously fun sandbox. You could ram a reinforced submarine through a submerged voxel iceberg and watch the ice dynamically shatter into thousands of pieces. The divergence algorithm immediately updates the mass and buoyancy of every newly broken ice chunk so they bob and spin to the surface realistically. At the same time the FMM driven water simulation violently rushes into the empty space left behind by the shattered ice creating a localized undertow that drags smaller ship debris around. You get a completely dynamic fluid and structural physics engine capable of handling massive fleet battles and catastrophic sinking events in real time.
+
+use wave function collapse to generate the map
 
 ## resources
 

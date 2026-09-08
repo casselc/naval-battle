@@ -30,12 +30,48 @@
 
   Everything is pure data ({:particles [...]}) and headless-testable.")
 
-(def BOUNDS 44.0)
+(def BOUNDS 58.0)
 (def LEAF-MAX 12)
 (def MAX-DEPTH 6)
 (def EXPANSION-P 10)
 (def VISCOSITY 0.04)
 (def SPRAY-G 20.0)
+
+;; ambient sea state: a travelling swell and slow turbulence eddies keep
+;; the open water alive between battles. Both are deterministic functions
+;; of (x, z, t), so every run - live or headless - shows the same sea.
+(def SWELL-AMP 0.45)        ; vertical orbital forcing, vy units/s
+(def SWELL-K 0.55)          ; wavenumber (~11-unit wavelength)
+(def SWELL-W 1.3)           ; angular frequency
+(def SWELL-DIR [0.86 0.51]) ; travel direction (diagonal across the arena)
+(def CHOP-RATE 0.35)        ; seconds between eddy reshuffles
+(def CHOP-AMP 0.0009)       ; vorticity injected per second: visible swirl
+
+(defn- chop-rand
+  "Deterministic pseudo-random in [-1,1) from grid position and time
+  bucket: the ambient turbulence field, reproducible everywhere."
+  [x z k]
+  (let [h (Math/abs (bit-xor (* (long (* x 8.0)) 374761393)
+                             (* (long (* z 8.0)) 668265263)
+                             (* (long k) 1274126177)))]
+    (- (* 2.0 (/ (double (mod h 1000003)) 1000003.0)) 1.0)))
+
+(defn- apply-ambient
+  "The open sea is never glass: a travelling swell forces the surface and
+  slow deterministic eddies stir gentle vorticity everywhere, so the whole
+  ocean reads as an active particle system even before the guns speak.
+  Becalmed oceans (:ambient false) skip this."
+  [ps t dt]
+  (let [kx (* SWELL-K (SWELL-DIR 0))
+        kz (* SWELL-K (SWELL-DIR 1))
+        kb (long (quot t CHOP-RATE))]
+    (mapv (fn [p]
+            (let [ph (- (+ (* kx (:x p)) (* kz (:z p))) (* SWELL-W t))]
+              (-> p
+                  (update :vy + (* SWELL-AMP dt (Math/sin ph)))
+                  (update :omega + (* CHOP-AMP dt
+                                         (chop-rand (:x p) (:z p) kb))))))
+          ps)))
 (def IMPULSE-DRAG 0.90)
 
 ;; --- complex numbers as [re im] ---------------------------------------------------
@@ -83,7 +119,8 @@
                         (assoc p :x (cl (:x p)) :z (cl (:z p)))))
                     specs)
    :bounds BOUNDS
-   :viscosity 0.0
+   :viscosity VISCOSITY
+   :ambient true
    :p EXPANSION-P})
 
 (defn total-circulation
@@ -453,24 +490,34 @@
                     p hulls))
           ps)))
 
+(def SURFACE-BREAK 0.7)  ; above this a particle is airborne spray, not surface
+(def SURFACE-K 2.5)      ; surface restoring spring: the swell rides it
+(def SURFACE-C 3.0)      ; surface damping: nearly critical, splashes settle in ~a second
+
 (defn- step-vertical
-  "Spray ballistic above the surface, splash-damped back onto it."
+  "Airborne spray (y > SURFACE-BREAK) falls ballistically under SPRAY-G.
+  Surface water is a damped oscillator about y = 0 - the ambient swell
+  rides it into travelling waves, blasts splash onto it and settle."
   [p dt]
-  (let [y (+ (:y p) (* (:vy p) dt))
-        vy (if (> (:y p) 0.0)
-             (- (:vy p) (* SPRAY-G dt))
-             (* 0.5 (:vy p)))]
-    (if (< y 0.0)
-      (assoc p :y 0.0 :vy 0.0)
+  (if (> (:y p) SURFACE-BREAK)
+    (let [y (+ (:y p) (* (:vy p) dt))
+          vy (- (:vy p) (* SPRAY-G dt))]
+      (if (< y SURFACE-BREAK)
+        (assoc p :y SURFACE-BREAK :vy (* 0.1 vy)) ; the splash eats the plunge
+        (assoc p :y y :vy vy)))
+    (let [y (max -0.6 (+ (:y p) (* (:vy p) dt)))
+          vy (- (:vy p) (* dt (+ (* SURFACE-K y)
+                                 (* SURFACE-C (:vy p)))))]
       (assoc p :y y :vy vy))))
 
 (def DIRECT-MAX 220)
 (def ACTIVE-EPS 1e-9)   ; vorticity at or below this is still water
 (def FIELD-RADIUS 14.0) ; the exact field reaches this far from any vortex
-(def SPARSE-MAX 4096)   ; actives up to this take the sparse/kernel path: the C
-                        ; field kernel covers every real battle state (~ms); the
-                        ; pure loop is the test reference. Past it the FMM takes
-                        ; over - the O(N*na) sums only lose at mega-sea scale.
+(def SPARSE-MAX 2048)   ; actives up to this take the sparse/kernel path. The
+                         ; ambient sea is fully active (every particle carries
+                         ; gentle chop), so the live ocean rides the C FMM
+                         ; kernel past this ceiling; the pure loop is the test
+                         ; reference.
 (def ^:private BUCKET 4.0) ; sparse-field target bucket width, world units
 
 (defn- sparse-velocities
@@ -510,6 +557,14 @@
 
   (atom nil))
 
+(def fmm-kernel
+  "Optional accelerator for the full-churn FMM field: physics/init! resets
+  this to the C kernel (voxel.seac/fmm) when the native library loads.
+  Ambient turbulence keeps the whole sea mildly active, so the live game
+  rides this path; tests run the pure FMM."
+
+  (atom nil))
+
 (defn velocities
   "The velocity field however it is cheapest at this sea state:
   - a still sea: no vortices, no field, no pair sums at all;
@@ -530,7 +585,9 @@
                            (k oc)
                            (sparse-velocities ps))
       (<= n DIRECT-MAX) (direct-velocities oc)
-      :else (fmm-velocities oc))))
+      :else (if-let [k @fmm-kernel]
+              (k oc)
+              (fmm-velocities oc)))))
 
 (defn step-ocean
   "Advance the ocean dt seconds. blasts and hulls are this frame's couplings
@@ -539,8 +596,11 @@
   ([oc dt blasts] (step-ocean oc dt blasts nil))
   ([oc dt blasts hulls]
    (let [ps (-> (:particles oc)
-                (apply-blasts blasts)
-                (apply-hulls hulls))
+                 (apply-blasts blasts)
+                 (apply-hulls hulls)
+                 ((fn [ps] (if (:ambient oc)
+                             (apply-ambient ps (or (:time oc) 0.0) dt)
+                             ps))))
          field (velocities (assoc oc :particles ps))
          vis (or (:viscosity oc) VISCOSITY)
          b (:bounds oc)

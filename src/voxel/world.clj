@@ -28,10 +28,10 @@
 (def BLAST-RADIUS 2.6)
 (def SUNK-DEPTH 6.0)
 (def SHELL-LIFETIME 12.0)
-;; 44 units apart: beyond the 36-unit low-arc gun range (v^2/g), so the
-;; fleets must close in before the guns can speak
-(def PLAYER-POS [0.0 -3.0 -22.0])
-(def ENEMY-POS [0.0 -3.0 22.0])
+;; 56 units apart: half again beyond the 36-unit low-arc gun range
+;; (v^2/g), so the fleets must properly sail in before the guns speak
+(def PLAYER-POS [0.0 -3.0 -28.0])
+(def ENEMY-POS [0.0 -3.0 28.0])
 
 ;; --- fleet -----------------------------------------------------------------
 
@@ -55,7 +55,7 @@
      :cooldown 0.0
      :sunk false}))
 
-(def SEA-EXTENT 32.0)   ; the simulated sheet spans [-EXTENT, EXTENT]^2
+(def SEA-EXTENT 48.0)   ; the simulated sheet spans [-EXTENT, EXTENT]^2
 (def SEA-SPACING 1.5)  ; one particle per SPAcing-unit tile
 (def SEA-COLS (int (inc (* 2.0 (/ SEA-EXTENT SEA-SPACING)))))
 
@@ -228,6 +228,33 @@
           (update :blasts conj {:x (point 0) :z (point 2) :r 3.5 :power 10.0})))))
 
 ;; --- the enemy gunner --------------------------------------------------------------
+
+(def ENGAGE-RANGE 30.0)  ; the AI sails in until the guns can reach
+
+(defn- bow-dir
+  "Unit bow direction of a ship in world space (bow at +k in layout)."
+  [s]
+  (buoy/q-rotate (:quat s) [0.0 0.0 1.0]))
+
+(defn ai-helm
+  "Helm order for an AI ship while the fleets close: full thrust and a
+  hard turn toward the nearest live foe until inside ENGAGE-RANGE, then
+  hold station and let the guns work. [thrust turn], right-positive."
+  [state id]
+  (let [s (get-in state [:ships id])
+        foe (first (remove #(or (:sunk %) (= id (:id %))) (vals (:ships state))))]
+    (if (or (nil? foe) (:sunk s) (not (:ai s)))
+      [0.0 0.0]
+      (let [[fx _ fz] (:pos foe)
+            [sx _ sz] (:pos s)
+            d (Math/sqrt (+ (* (- fx sx) (- fx sx)) (* (- fz sz) (- fz sz))))]
+        (if (> d ENGAGE-RANGE)
+          (let [[bx _ bz] (bow-dir s)
+                cross-y (- (* bz (- fx sx)) (* bx (- fz sz)))]
+            (if (< (Math/abs cross-y) 0.5)
+              [1.0 0.0]
+              [1.0 (Math/signum cross-y)]))
+          [0.0 0.0])))))
 
 (defn- aim-point
   "Where an AI gunner aims: the foe's position one estimated flight-time

@@ -145,3 +145,16 @@
     (settle 8.0 0.05)
     (is (> (yaw-of (body-fact (sail id 3.0 0.05 0.0 1.0) id)) 0.15)
         "right helm swings the bow toward +x (starboard)")))
+
+(deftest c-fmm-matches-the-pure-fmm
+  (testing "the C multi-level quadtree FMM replicates the pure reference"
+    (let [ps (cloud 420 80 31)
+          oc (ocean/make-ocean ps)
+          pure (ocean/fmm-velocities oc)
+          got (seac/fmm ps 10 ocean/BOUNDS)]
+      (is (= (count pure) (count got)))
+      (is (every? (fn [[u v]] (< (max (Math/abs (- (nth u 0) (nth v 0)))
+                                      (Math/abs (- (nth u 2) (nth v 2))))
+                                 1e-8))
+                  (mapv vector pure got))
+          "velocities agree with the pure FMM to rounding"))))

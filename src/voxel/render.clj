@@ -54,21 +54,28 @@
 ;; rebuilt only when damage or sinking changes the hull)
 (defonce ship-meshes (volatile! {}))
 
-(defn- ship-extent
-  "Hull footprint semi-axes [ex ez] from its face cells."
-  [faces]
-  (let [abs #(Math/abs (double %))
-        is (map #(first (first %)) faces)
-        ks (map #((first %) 2) faces)]
-    [(inc (apply max (cons 0 (map abs is))))
-     (inc (apply max (cons 0 (map abs ks))))]))
+(defn ship-extent
+  "Hull footprint semi-axes [ex ez] about the anchor, from its face cells.
+  Cell indices are grid coordinates, so the anchor has to come out of them
+  first - measuring |i| and |k| raw returns the distance from the grid
+  origin, which for the dreadnought is twice the true half-length."
+  [faces anchor]
+  (let [ax (double (anchor 0))
+        az (double (anchor 2))
+        reach (fn [sel a]
+                (reduce (fn [m face]
+                          (let [c (double (sel (first face)))]
+                            (max m (Math/abs (- (+ c 0.5) a)))))
+                        0.0 faces))]
+    [(+ 0.5 (reach #(% 0) ax))
+     (+ 0.5 (reach #(% 2) az))]))
 
 (defn- ensure-ship-mesh!
   "The C mesh for one hull, rebuilt only when its signature (exposed-face
   count, sunk) changes: jolt owns the per-face colours at build time -
   material, per-cell tint, wreck shading - and C owns the per-frame
   rotate/cull/shade/submit."
-  [id {:keys [cells faces sunk]}]
+  [id {:keys [cells faces sunk] :as ship}]
   (let [sig [(count faces) sunk]
         st (get @ship-meshes id)]
     (if (and st (= sig (:sig st)))
@@ -80,7 +87,7 @@
                              fseq)
                 mid (seac/ship-init! fseq colors)]
             (vswap! ship-meshes assoc id
-                    {:id mid :sig sig :ext (ship-extent fseq)})
+                    {:id mid :sig sig :ext (ship-extent fseq (:anchor ship))})
             mid)))))
 
 (defn- draw-ship!

@@ -7,6 +7,7 @@
 // work in C. Ids cross the boundary as the integers b3StoreBodyId/b3StoreWorldId
 // produce. See scripts/build-native.sh for the build.
 #include <stdint.h>
+#include <stdio.h>
 
 #include <box3d/box3d.h>
 
@@ -62,7 +63,9 @@ uint64_t vb3_body_create( uint32_t world, int type, double x, double y, double z
 	// sleep (Box3D default 0.05 keeps nudged piles awake forever, and one
 	// awake body in a pile re-wakes everything it touches)
 	def.sleepThreshold = 0.75f;
-	return b3StoreBodyId( b3CreateBody( b3LoadWorldId( world ), &def ) );
+	b3BodyId bid = b3CreateBody( b3LoadWorldId( world ), &def );
+	fprintf( stderr, "[vb3] body_create world=%u id=%llx\n", world, (unsigned long long)b3StoreBodyId( bid ) );
+	return b3StoreBodyId( bid );
 }
 
 void vb3_body_destroy( uint64_t body )
@@ -81,6 +84,7 @@ void vb3_body_add_box( uint64_t body, double lx, double ly, double lz, float hx,
 	sd.baseMaterial.friction = friction;
 	sd.baseMaterial.restitution = restitution;
 	b3BoxHull hull = b3MakeOffsetBoxHull( hx, hy, hz, (b3Vec3){ (float)lx, (float)ly, (float)lz } );
+	fprintf( stderr, "[vb3] add_box body=%llx\n", (unsigned long long)body );
 	b3CreateHullShape( b3LoadBodyId( body ), &sd, &hull.base );
 }
 

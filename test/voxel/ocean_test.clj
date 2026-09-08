@@ -73,7 +73,7 @@
 
 (deftest advection-conserves-circulation
   (testing "total circulation is carried unchanged by the step"
-    (let [oc (random-cloud 40 99)]
+    (let [oc (assoc (random-cloud 40 99) :ambient false :viscosity 0.0)]
       (is (near (sea/total-circulation oc)
                 (sea/total-circulation (sea/step-ocean oc 0.016 nil))
                 1e-12))))
@@ -88,7 +88,7 @@
           ;; quarter orbit time: t = (pi/2) r / speed
           dt 0.002
           t-q (/ (* 0.5 Math/PI r) speed)
-          stepped (nth (iterate #(sea/step-ocean % dt nil) oc)
+          stepped (nth (iterate #(sea/step-ocean (assoc % :ambient false) dt nil) oc)
                        (int (Math/round (/ t-q dt))))
           [p1 p2] (:particles stepped)]
       ;; after a quarter orbit the pair sits near the z axis
@@ -105,7 +105,8 @@
 
 (deftest spray-falls-back-to-the-surface
   (testing "particles above the water fall, splash, and settle"
-    (let [oc (sea/make-ocean [{:x 0.0 :z 0.0 :omega 0.0 :y 3.0 :vy 0.0}])
+    (let [oc (assoc (sea/make-ocean [{:x 0.0 :z 0.0 :omega 0.0 :y 3.0 :vy 0.0}])
+                    :ambient false)
           fallen (nth (iterate #(sea/step-ocean % 0.016 nil) oc) 400)]
       (is (near 0.0 (-> fallen :particles first :y) 1e-3))
       (is (near 0.0 (-> fallen :particles first :vy) 1e-3)))))
@@ -166,9 +167,10 @@
         "the full sum would have moved it - the cutoff is the optimisation")))
 
 (deftest still-water-stays-put
-  (testing "a calm sea steps without touching a single particle"
-    (let [oc (sea/make-ocean (mapv #(assoc % :omega 0.0)
-                                   (:particles (random-cloud 300 14))))]
+  (testing "a becalmed sea (no ambient) steps without touching a particle"
+    (let [oc (assoc (sea/make-ocean (mapv #(assoc % :omega 0.0)
+                                          (:particles (random-cloud 300 14))))
+                    :ambient false)]
       (is (= (:particles oc) (:particles (sea/step-ocean oc 0.05 nil nil)))))))
 
 (deftest battle-churn-runs-the-field-kernel
@@ -197,3 +199,32 @@
   (testing "at or under DIRECT-MAX particles the field is the direct Biot-Savart sum"
     (let [oc (random-cloud sea/DIRECT-MAX 7)]
       (is (= (sea/direct-velocities oc) (sea/velocities oc))))))
+
+(deftest the-open-sea-has-ambient-swell
+  (testing "an ambient sea visibly moves but stays bounded and in place"
+    (let [oc (sea/make-ocean (mapv #(assoc % :omega 0.0)
+                                   (:particles (random-cloud 120 21))))
+          stepped (reduce (fn [o _] (sea/step-ocean o 0.05 nil nil))
+                          oc (range 120))]
+      (is (some #(> (:y %) 0.01) (:particles stepped))
+          "travelling swell lifts the surface")
+      (is (some #(> (Math/abs (:vy %)) 1e-4) (:particles stepped))
+          "the water is still in motion")
+      (let [b (:bounds oc)
+            escaped (some (fn [p] (or (> (Math/abs (:x p)) b)
+                                      (> (Math/abs (:z p)) b)))
+                          (:particles stepped))]
+        (is (nil? escaped) "no particle drifts out of the domain"))
+      (let [mean-vx (/ (reduce + (map :vx (:particles stepped)))
+                       (count (:particles stepped)))]
+        (is (< (Math/abs mean-vx) 0.05)
+            "swell stirs the water without a net current")))))
+
+(deftest ambient-churn-stays-gentle
+  (testing "turbulence eddies stay well under battle vorticity"
+    (let [oc (sea/make-ocean (mapv #(assoc % :omega 0.0)
+                                   (:particles (random-cloud 120 22))))
+          stepped (reduce (fn [o _] (sea/step-ocean o 0.05 nil nil))
+                          oc (range 300))]
+      (is (< (apply max (map #(Math/abs (:omega %)) (:particles stepped))) 0.05)
+          "ambient chop, not a maelstrom"))))

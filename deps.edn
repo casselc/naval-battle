@@ -60,11 +60,14 @@
 
   sea
   {:doc "compile native/voxel_sea.c into the sea-field kernel library"
+   ;; mtime-checked like `native`: existence alone silently ships a stale
+   ;; library every time the C is edited.
    :task (let [sea-lib (str "native/libvoxel_sea." (if mac? "dylib" "so"))
                sea-src "native/voxel_sea.c"]
-           (if (fs/exists? sea-lib)
-             (println "sea: up to date")
-             (do (shell "cc" "-O2" "-shared" "-fPIC"
+           (if (and (fs/exists? sea-lib)
+                    (empty? (fs/modified-since sea-lib [sea-src])))
+             (println "sea: up to date -" sea-lib)
+             (do (shell "cc" "-O2" "-std=c11" "-shared" "-fPIC"
                         (str "-I" (or (System/getenv "RAYLIB_INCLUDE")
                                       "/opt/homebrew/include"))
                         sea-src "-o" sea-lib

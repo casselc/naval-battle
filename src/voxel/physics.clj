@@ -44,6 +44,15 @@
             (fn [oc] (seac/field (:particles oc)
                                  ocean/FIELD-RADIUS ocean/ACTIVE-EPS)))
     (catch Exception _ nil))
+  ;; the C multi-level FMM kernel: the same field as the pure FMM at
+  ;; native speed, for the fully-churned ambient ocean
+  (try
+    (seac/fmm [{:x 0.0 :z 0.0 :omega 0.0} {:x 1.0 :z 0.0 :omega 1.0}]
+              10 ocean/BOUNDS)
+    (reset! ocean/fmm-kernel
+            (fn [oc] (seac/fmm (:particles oc)
+                               (or (:p oc) 10) (:bounds oc))))
+    (catch Exception _ nil))
   (let [wrld (b3/create-world 0.0 (- w/GRAVITY) 0.0 1)]
     (vreset! world* wrld)
     (vreset! ball* nil)
