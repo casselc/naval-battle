@@ -60,6 +60,14 @@ jobs:
           path: .qualification/jolt-chdb
           persist-credentials: false
 
+      - name: Checkout raylib 6.0
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: raysan5/raylib
+          ref: dbc56a87da87d973a9c5baa4e7438a9d20121d28
+          path: .qualification/raylib
+          persist-credentials: false
+
       - name: Install Jolt v0.8.3
         run: |
           set -euo pipefail
@@ -75,9 +83,26 @@ jobs:
       - name: Provision pinned Chez and aspect compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends uuid-dev
+          sudo apt-get install -y --no-install-recommends \
+            cmake libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libx11-dev \
+            uuid-dev x11-xkb-utils xauth xvfb
           make -C .qualification/jolt deps JOLT_SYSTEM_CHEZ=
           test "$(.qualification/jolt/bin/jolt --version)" = "jolt v0.8.3-41-g5d56b9e5"
+
+      - name: Build pinned game native dependencies
+        run: |
+          make -C .qualification/raylib/src \
+            PLATFORM=PLATFORM_DESKTOP RAYLIB_LIBTYPE=SHARED
+          RAYLIB_INCLUDE="$GITHUB_WORKSPACE/.qualification/raylib/src" \
+            LIBRARY_PATH="$GITHUB_WORKSPACE/.qualification/raylib/src" \
+            LD_LIBRARY_PATH="$GITHUB_WORKSPACE/.qualification/raylib/src" \
+            jolt native
+          RAYLIB_INCLUDE="$GITHUB_WORKSPACE/.qualification/raylib/src" \
+            LIBRARY_PATH="$GITHUB_WORKSPACE/.qualification/raylib/src" \
+            LD_LIBRARY_PATH="$GITHUB_WORKSPACE/.qualification/raylib/src" \
+            jolt sea
+          jolt hull
 
       - name: Qualify chDB native library
         working-directory: .qualification/jolt-chdb
@@ -103,3 +128,18 @@ jobs:
           jolt -Srepro \
             -Sdeps '{:paths ["${{ github.workspace }}/src" "${{ github.workspace }}/test"] :deps {io.github.chucklehead-dev/oscope {:git/url "https://github.com/chucklehead-dev/oscope.git" :git/sha "4770e817ad3821c9d060d4fe4dc6ef1f32bf0420"}}}' \
             -M -m voxel.telemetry-test-runner
+
+      - name: Build woven embedded game
+        env:
+          JOLT_ASPECT_JOLT: ${{ github.workspace }}/.qualification/jolt/bin/jolt
+          JOLT_CHEZ_WRAPPER: /usr/bin/env
+          JOLT_CHDB_ROOT: ${{ github.workspace }}/.qualification/jolt-chdb
+          RAYLIB_LIB: ${{ github.workspace }}/.qualification/raylib/src/libraylib.so
+        run: instrumentation/scripts/build_embedded.sh
+
+      - name: Verify woven native game persistence
+        env:
+          JOLT_CHDB_LIB: ${{ runner.temp }}/chdb-durable/native/libchdb.so
+          JOLT_CHEZ_WRAPPER: /usr/bin/env
+          LD_LIBRARY_PATH: ${{ github.workspace }}/.qualification/raylib/src
+        run: instrumentation/scripts/verify_embedded_native.sh

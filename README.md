@@ -84,14 +84,25 @@ persist, reopen, and query the telemetry.
 
 ### Opt-in embedded telemetry case study
 
-The `:telemetry` profile wraps the unchanged game entry point with an in-process
+The woven telemetry build wraps the unchanged game entry point with an in-process
 OpenTelemetry SDK, a Durable local chDB store, and an oscope viewer bound only
 to loopback:
 
 ```sh
-jolt -M:telemetry
+jolt native && jolt sea && jolt hull
+JOLT_CHDB_ROOT=/path/to/jolt-chdb \
+RAYLIB_LIB=/path/to/libraylib.so \
+  instrumentation/scripts/build_embedded.sh
+JOLT_CHDB_LIB=/path/to/qualified/libchdb.so \
+  target/telemetry/naval-battle
 # [voxel] embedded telemetry viewer: http://127.0.0.1:4320/oscope/telemetry
 ```
+
+`build_embedded.sh` uses the aspect-capable Jolt compiler selected by
+`JOLT_ASPECT_JOLT`, embeds jolt-chdb's ABI descriptor, and verifies the original
+gameplay/native checksum manifest before and after the build. The ordinary
+`:telemetry` alias supplies the oscope dependency and launcher; running that
+alias directly is an unwoven diagnostic, not the instrumented game.
 
 The game-to-exporter path has no OTLP JSON, HTTP framing, or receiver. HTTP is
 used only for the adjacent human viewer. Data is stored under
@@ -103,6 +114,9 @@ port). The viewer host is deliberately restricted to `127.0.0.1`.
 Durable chDB currently requires the separately qualified chDB core
 26.7.2-rc.2 ABI. The stable 26.7.0 library installed by default lacks that ABI;
 point `JOLT_CHDB_LIB` at the qualified library before using this profile.
+Box3D is fetched at the revision pinned in `deps.edn`; the Linux sea build also
+enables the libc feature definitions required for `M_PI` without changing the
+native simulation source.
 
 This profile is separate so ordinary builds and tests do not resolve oscope,
 chDB, or the OTel SDK. It is intended to be paired with the aspect-instrumented

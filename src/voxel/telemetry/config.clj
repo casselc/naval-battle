@@ -12,7 +12,11 @@
    :hud-interval-ms 1000
    :checkpoint-on-close? true
    :sdk-options {:service-name "naval-battle"
-                 :processor :batch
+                 ;; Sparse lifecycle signals should reach the adjacent viewer
+                 ;; immediately. Metrics refresh at the HUD cadence instead of
+                 ;; the SDK's one-minute default.
+                 :processor :simple
+                 :metric-interval-ms 1000
                  :metrics? true
                  :runtime-metrics? true
                  :logs? true

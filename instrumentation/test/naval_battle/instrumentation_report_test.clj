@@ -24,7 +24,8 @@
 
 (deftest exact-real-source-weave-report
   (let [report (edn/read-string
-                (slurp "../../target/instrumentation/aspects.edn"))
+                (slurp (or (System/getenv "NAVAL_ASPECT_REPORT")
+                           "../../target/instrumentation/aspects.edn")))
         actual
         (into {}
               (map (fn [aspect]

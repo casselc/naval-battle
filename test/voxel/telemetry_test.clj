@@ -258,6 +258,8 @@
     (is (= "case-study" (:object-id options)))
     (is (= "naval-battle-acceptance"
            (get-in options [:sdk-options :service-name])))
+    (is (= :simple (get-in options [:sdk-options :processor])))
+    (is (= 1000 (get-in options [:sdk-options :metric-interval-ms])))
     (is (= "127.0.0.1" (:host options))))
   (is (thrown? Exception
                (config/env-options {"VOXEL_OTEL_VIEWER_PORT" "70000"}))))

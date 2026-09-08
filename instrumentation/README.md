@@ -10,6 +10,21 @@ instrumentation/scripts/verify.sh
 instrumentation/scripts/verify_oscope.sh
 ```
 
+Build the actual embedded game with the same pack after compiling the three
+game native shims:
+
+```sh
+JOLT_CHDB_ROOT=/path/to/jolt-chdb \
+RAYLIB_LIB=/path/to/libraylib.so \
+  instrumentation/scripts/build_embedded.sh
+```
+
+This combined build is required for the in-game HUD. It merges the game,
+fork-local pack, oscope launcher, real native libraries, and jolt-chdb ABI
+resource into one self-contained executable. `verify_embedded_native.sh` runs
+that executable under the current display or Xvfb, then independently reopens
+the Durable object and requires real match, frame, and operation telemetry.
+
 Both scripts select Chez Scheme 10.4.1 through the workspace wrapper. The first
 builds plain and woven headless workloads, compares their application output
 byte-for-byte, checks the compiled aspect report, and validates traces, metrics,
