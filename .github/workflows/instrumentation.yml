@@ -33,6 +33,8 @@ jobs:
       JOLT_GITLIBS_DIR: ${{ github.workspace }}/.jolt-gitlibs-v0.8.3
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
 
       - name: Checkout aspect-capable Jolt compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

@@ -59,10 +59,13 @@ sha256sum --check instrumentation/gameplay.sha256
 "$wrapper" "$compiler" -Sdeps "$deps" -A:telemetry build \
   -m voxel.telemetry.main -o "$out"
 report_deps="{:paths [\"$root/instrumentation/test\"]}"
-NAVAL_ASPECT_REPORT="$report" "$wrapper" jolt -Srepro -Sdeps "$report_deps" \
-  -M -e "(require 'naval-battle.instrumentation-report-test 'clojure.test)
-         (let [r (clojure.test/run-tests 'naval-battle.instrumentation-report-test)]
-           (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))"
+(
+  cd /tmp
+  NAVAL_ASPECT_REPORT="$report" "$wrapper" jolt -Srepro -Sdeps "$report_deps" \
+    -M -e "(require 'naval-battle.instrumentation-report-test 'clojure.test)
+           (let [r (clojure.test/run-tests 'naval-battle.instrumentation-report-test)]
+             (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))"
+)
 sha256sum --check instrumentation/gameplay.sha256
 echo "woven embedded telemetry binary: $out"
 echo "aspect report: $report"
