@@ -12,11 +12,11 @@ record is posted through OTLP and no screenshot uses fixture data.
    shot and inspect its semantic game attributes.
 3. `03-frame-metric.png` — find the cumulative presented-frame metric in the
    bounded logs-and-metrics query.
-4. `04-metric-chart.png` — group the actual game and runtime metrics by at most
-   six short, readable units, explicitly including the game-specific
-   `{action}` and `{frame}`, instead of plotting crowded metric names.
+4. `04-metric-chart.png` — count the actual game spans by activity, including
+   match start, repeated firing, and impacts, with at most six short names.
 5. `05-plotje-query-edit.png` — carry that bounded query into Plotje and edit
-   the title and palette without replacing it with literal sample data.
+   the activity title, axis labels, and palette without replacing it with
+   literal sample data.
 6. `naval-telemetry-tour.webm` and `naval-telemetry-tour.gif` — the same browser
    sequence as a short video and review-friendly animation.
 
@@ -54,8 +54,8 @@ The present oscope series renderer cannot use a fixed one-minute counter or
 histogram bucket from this short run: its single populated point reaches the
 numeric scale as `NaN` and the request fails closed. An unbucketed counter
 collapses the run into one categorical bar, while line and area marks reject a
-categorical x column. A follow-up oscope issue should make singleton numeric
-series render as a point (and define a zero-width scale) so this scene can
-become a frame-increase time series with a line-to-area edit. Until then the
-bounded metric-unit chart is the legible, query-backed representation; Plotje
-still demonstrates live title and palette edits over the real rows.
+categorical x column. [oscope issue #41](https://github.com/chucklehead-dev/oscope/issues/41)
+tracks making singleton numeric series render as a point with a defined
+zero-width scale. Until then, the bounded game-span activity chart is a useful,
+query-backed representation; Plotje demonstrates live title, axes, and palette
+edits over those real rows.

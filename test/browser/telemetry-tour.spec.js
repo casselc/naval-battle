@@ -34,27 +34,38 @@ test("tour real woven game telemetry from trace to editable chart", async ({page
   await screenshot(page, "03-frame-metric.png");
   await pause(900);
 
-  await page.goto("/oscope?signal=metrics&field=metric-unit&window=15m&limit=6");
+  const activityQuery = "/oscope?signal=spans&field=span-name&window=15m&limit=6";
+  // This page is a bounded snapshot rather than a live subscription. Reissue
+  // the real query until the first shell impact has reached durable storage.
+  await expect.poll(async () => {
+    await page.goto(activityQuery);
+    return page.locator("#oscope-screen").innerText();
+  }, {timeout: 30_000}).toContain("game.impact");
   await expect(page.locator("#oscope-screen svg")).toBeVisible();
-  await expect(page.locator("#oscope-screen")).toContainText("Metric Unit");
-  await expect(page.locator("#oscope-screen")).toContainText("{action}");
-  await expect(page.locator("#oscope-screen")).toContainText("{frame}");
+  await expect(page.locator("#oscope-screen")).toContainText("game.match.start");
+  await expect(page.locator("#oscope-screen")).toContainText("game.action.fire");
+  await expect(page.locator("#oscope-screen")).toContainText("game.impact");
   await screenshot(page, "04-metric-chart.png");
   await pause(900);
 
   await page.getByRole("link", {name: "Edit this chart"}).click();
   const editor = page.getByLabel("Chart specification");
-  await expect(editor).toHaveValue(/:source :current-query/);
+  await expect(editor).toHaveValue(/:source :telemetry-query/);
+  await expect(editor).toHaveValue(/:group-by \[:span-name\]/);
   await expect(editor).toHaveValue(/:mark :bar/);
   const actualSpec = await editor.inputValue();
   await editor.fill(actualSpec
-    .replace(/:title "[^"]+"/, ':title "Naval battle metric units"')
+    .replace(/:title "[^"]+"/, ':title "Naval battle activity"')
+    .replace(/:x-label "[^"]+"/, ':x-label "Game span"')
+    .replace(/:y-label "[^"]+"/, ':y-label "Occurrences"')
     .replace(/:palette \[[^\]]+\]/,
              ':palette ["#0ea5e9" "#f97316"]'));
   await expect(page.locator("#plotje-preview svg")).toBeVisible();
   await expect(page.locator("#plotje-preview"))
-    .toContainText("Naval battle metric units");
-  await expect(editor).toHaveValue(/:source :current-query/);
+    .toContainText("Naval battle activity");
+  await expect(page.locator("#plotje-preview")).toContainText("Game span");
+  await expect(page.locator("#plotje-preview")).toContainText("Occurrences");
+  await expect(editor).toHaveValue(/:source :telemetry-query/);
   await expect(editor).toHaveValue(/:mark :bar/);
   await expect(editor).toHaveValue(/#0ea5e9/);
   await screenshot(page, "05-plotje-query-edit.png");
