@@ -7,6 +7,13 @@ on:
       - .github/workflows/instrumentation.yml
       - deps.edn
       - instrumentation/**
+      - docs/demo/**
+      - package.json
+      - package-lock.json
+      - playwright.config.js
+      - scripts/capture-telemetry-demo.sh
+      - scripts/check-demo-media.py
+      - test/browser/**
       - resources/telemetry/**
       - src/voxel/**
       - test/voxel/**
@@ -16,6 +23,13 @@ on:
       - .github/workflows/instrumentation.yml
       - deps.edn
       - instrumentation/**
+      - docs/demo/**
+      - package.json
+      - package-lock.json
+      - playwright.config.js
+      - scripts/capture-telemetry-demo.sh
+      - scripts/check-demo-media.py
+      - test/browser/**
       - resources/telemetry/**
       - src/voxel/**
       - test/voxel/**
@@ -88,7 +102,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake libasound2-dev libgl1-mesa-dev libglu1-mesa-dev \
             libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libx11-dev \
-            uuid-dev x11-xkb-utils xauth xvfb
+            uuid-dev x11-xkb-utils xauth xvfb ffmpeg
           make -C .qualification/jolt deps JOLT_SYSTEM_CHEZ=
           test "$(.qualification/jolt/bin/jolt --version)" = "jolt v0.8.3-41-g5d56b9e5"
 
@@ -145,3 +159,8 @@ jobs:
           JOLT_CHEZ_WRAPPER: /usr/bin/env
           LD_LIBRARY_PATH: ${{ github.workspace }}/.qualification/raylib/src
         run: instrumentation/scripts/verify_embedded_native.sh
+
+      - name: Verify demo harness syntax and bounded media
+        run: |
+          npm run demo:syntax
+          npm run demo:check

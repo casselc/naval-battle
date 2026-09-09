@@ -4,7 +4,10 @@ vendor/
 # built shim (rebuilt with `jolt native`)
 native/*.dylib
 native/*.so
+native/*.so.*
 target/
+node_modules/
+__pycache__/
 
 # tool caches
 .jolt/

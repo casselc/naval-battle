@@ -1,0 +1,16 @@
+{
+  "name": "naval-battle-telemetry-demo",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "demo:capture": "scripts/capture-telemetry-demo.sh",
+    "demo:check": "python3 scripts/check-demo-media.py",
+    "demo:syntax": "bash -n scripts/capture-telemetry-demo.sh && node --check test/browser/telemetry-tour.spec.js",
+    "test:browser": "playwright test --project=demo"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}
