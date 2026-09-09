@@ -7,7 +7,7 @@
   "scripts": {
     "demo:capture": "scripts/capture-telemetry-demo.sh",
     "demo:check": "python3 scripts/check-demo-media.py",
-    "demo:syntax": "bash -n scripts/capture-telemetry-demo.sh && node --check test/browser/telemetry-tour.spec.js",
+    "demo:syntax": "bash -n scripts/capture-telemetry-demo.sh && node --check playwright.config.js && node --check test/browser/telemetry-tour.spec.js",
     "test:browser": "playwright test --project=demo"
   },
   "devDependencies": {

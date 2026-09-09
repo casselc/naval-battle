@@ -147,8 +147,8 @@ fork point used by this case study.
 The [telemetry demo storyboard](docs/demo/README.md) captures one real woven
 game run from its in-game HUD through trace filtering, frame-metric lookup, a
 metric chart, and a query-backed Plotje edit. Its rendering job is opt-in; CI
-checks the committed media formats, dimensions, and size bounds without needing
-OpenGL or video codecs.
+checks the committed media formats, dimensions, duration, and decodeability
+with ffmpeg, without needing OpenGL or a display server.
 
 ## Controls
 

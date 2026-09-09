@@ -38,6 +38,12 @@ cd "$root"
 sha256sum --check instrumentation/gameplay.sha256
 sha256sum --check resources/telemetry/gameplay-source.sha256
 
+if ! git diff --quiet -- src native instrumentation resources deps.edn || \
+   ! git diff --cached --quiet -- src native instrumentation resources deps.edn; then
+  echo "refusing to capture with dirty runtime/build inputs" >&2
+  exit 1
+fi
+
 # Never capture an opaque prebuilt executable. The builder verifies the
 # gameplay manifest, embeds the qualified chDB ABI, validates the exact aspect
 # report, and overwrites this output from the current checkout.
@@ -48,6 +54,7 @@ test -x "$binary"
 test -s "$report"
 {
   printf 'source-head %s\n' "$(git rev-parse HEAD)"
+  git ls-files -s -- src native instrumentation resources deps.edn | sha256sum
   sha256sum "$binary" "$report"
 } >"$run_dir/build-provenance.txt"
 
